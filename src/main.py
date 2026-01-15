@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""
+Video Clip Selection and Sequencing via Language and Vision Models
+
+Main CLI application entry point.
+
+This application automatically generates edited videos by:
+1. Indexing B-roll video footage using VideoPrism
+2. Transcribing voice-over audio using Whisper
+3. Segmenting the script using an LLM
+4. Matching script segments to video clips
+5. Assembling and exporting the final video
+"""
+
+import argparse
+import logging
+import json
+import sys
+from pathlib import Path
+from typing import Optional
+
+# Import modules
+from indexing import VideoIndexer
+from transcription import VoiceTranscriber, TranscriptionAnalyzer
+from segmentation import ScriptSegmenter, LLMProvider
+from matching import VideoTextMatcher, create_sequence
+from assembly import VideoAssembler, VideoSequenceBuilder
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class VideoSequencingPipeline:
+    """Main pipeline orchestrating the entire video sequencing process"""
+    
+    def __init__(
+        self,
+        video_dir: str,
+        audio_file: str,
+        output_dir: str,
+        cache_dir: str = './cache'
+    ):
+        """
+        Initialize the pipeline.
+        
+        Args:
+            video_dir: Directory containing B-roll videos
+            audio_file: Path to voice-over audio file
+            output_dir: Directory for output files
+            cache_dir: Directory for caching intermediate results
+        """
+        self.video_dir = Path(video_dir)
+        self.audio_file = Path(audio_file)
+        self.output_dir = Path(output_dir)
+        self.cache_dir = Path(cache_dir)
+        
+        # Create directories
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize components
+        self.indexer = None
+        self.transcriber = None
+        self.segmenter = None
+        self.matcher = None
+        self.assembler = None
+        
+        logger.info("VideoSequencingPipeline initialized")
+    
+    def run(
+        self,
+        llm_provider: str = 'openai',
+        whisper_model: str = 'base',
+        videoprism_model: str = 'videoprism_public_v1_base',
+        allow_reuse: bool = True,
+        prefer_non_reused: bool = True
+    ) -> Optional[Path]:
+        """
+        Run the complete pipeline.
+        
+        Args:
+            llm_provider: LLM provider ('openai' or 'huggingface')
+            whisper_model: Whisper model size ('tiny', 'base', 'small', 'medium', 'large')
+            videoprism_model: VideoPrism model to use
+            allow_reuse: Whether to allow reusing video clips
+            prefer_non_reused: Prefer non-reused clips if possible
+        
+        Returns:
+            Path to output video or None if failed
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("Starting Video Sequencing Pipeline")
+            logger.info("=" * 80)
+            
+            # Step 1: Index videos
+            logger.info("\n[STEP 1] Indexing B-roll videos...")
+            if not self._index_videos(videoprism_model):
+                return None
+            
+            # Step 2: Transcribe audio
+            logger.info("\n[STEP 2] Transcribing voice-over audio...")
+            transcription = self._transcribe_audio(whisper_model)
+            if transcription is None:
+                return None
+            
+            # Step 3: Segment script
+            logger.info("\n[STEP 3] Segmenting script into semantic chunks...")
+            segments = self._segment_script(transcription, llm_provider)
+            if segments is None:
+                return None
+            
+            # Step 4: Match segments to videos
+            logger.info("\n[STEP 4] Matching script segments to video clips...")
+            clip_selections = self._match_and_sequence(
+                segments,
+                allow_reuse=allow_reuse,
+                prefer_non_reused=prefer_non_reused
+            )
+            if clip_selections is None:
+                return None
+            
+            # Step 5: Assemble and export
+            logger.info("\n[STEP 5] Assembling and exporting final video...")
+            output_video = self._assemble_video(clip_selections, transcription)
+            
+            if output_video:
+                logger.info("=" * 80)
+                logger.info(f"SUCCESS! Output video: {output_video}")
+                logger.info("=" * 80)
+            
+            return output_video
+        
+        except Exception as e:
+            logger.error(f"Pipeline failed: {e}", exc_info=True)
+            return None
+    
+    def _index_videos(self, model_name: str) -> bool:
+        """Index all videos in the video directory"""
+        try:
+            cache_file = self.cache_dir / 'video_index'
+            
+            self.indexer = VideoIndexer(
+                model_name=model_name,
+                index_dir=str(cache_file)
+            )
+            
+            # Try to load existing index
+            if self.indexer.load_index():
+                logger.info(f"Loaded existing video index with {len(self.indexer.metadata_list)} videos")
+                return True
+            
+            # Create new index
+            num_indexed = self.indexer.index_videos(str(self.video_dir))
+            
+            if num_indexed == 0:
+                logger.error("No videos were indexed")
+                return False
+            
+            logger.info(f"Successfully indexed {num_indexed} videos")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error indexing videos: {e}")
+            return False
+    
+    def _transcribe_audio(self, model_size: str):
+        """Transcribe voice-over audio"""
+        try:
+            cache_file = self.cache_dir / 'transcription.json'
+            
+            # Check if transcription already exists
+            if cache_file.exists():
+                logger.info("Loading cached transcription")
+                self.transcriber = VoiceTranscriber(model_size=model_size)
+                return self.transcriber.load_transcription(str(cache_file))
+            
+            # Transcribe audio
+            self.transcriber = VoiceTranscriber(model_size=model_size)
+            transcription = self.transcriber.transcribe(str(self.audio_file))
+            
+            # Save transcription
+            self.transcriber.save_transcription(transcription, str(cache_file))
+            
+            logger.info(f"Transcription complete:")
+            logger.info(f"  Language: {transcription.language}")
+            logger.info(f"  Duration: {transcription.duration:.2f}s")
+            logger.info(f"  Words: {len(transcription.words)}")
+            
+            return transcription
+        
+        except Exception as e:
+            logger.error(f"Error transcribing audio: {e}")
+            return None
+    
+    def _segment_script(self, transcription, llm_provider: str):
+        """Segment script into semantic chunks"""
+        try:
+            cache_file = self.cache_dir / 'segments.json'
+            
+            # Check if segments already exist
+            if cache_file.exists():
+                logger.info("Loading cached segments")
+                self.segmenter = ScriptSegmenter(provider=LLMProvider(llm_provider))
+                return self.segmenter.load_segments(str(cache_file))
+            
+            # Segment script
+            provider = LLMProvider.OPENAI if llm_provider == 'openai' else LLMProvider.HUGGINGFACE
+            self.segmenter = ScriptSegmenter(provider=provider)
+            
+            words_with_timing = [
+                {
+                    'word': w.word,
+                    'start_time': w.start_time,
+                    'end_time': w.end_time
+                }
+                for w in transcription.words
+            ]
+            
+            segments = self.segmenter.segment_script(
+                transcription.full_text,
+                words_with_timing
+            )
+            
+            # Save segments
+            self.segmenter.save_segments(segments, str(cache_file))
+            
+            logger.info(f"Script segmentation complete:")
+            logger.info(f"  Segments: {len(segments)}")
+            for seg in segments:
+                logger.info(f"    [{seg.segment_id}] {seg.description} ({seg.duration:.2f}s)")
+            
+            return segments
+        
+        except Exception as e:
+            logger.error(f"Error segmenting script: {e}")
+            return None
+    
+    def _match_and_sequence(
+        self,
+        segments,
+        allow_reuse: bool = True,
+        prefer_non_reused: bool = True
+    ):
+        """Match script segments to video clips"""
+        try:
+            cache_file = self.cache_dir / 'clip_selections.json'
+            
+            # Initialize matcher
+            self.matcher = VideoTextMatcher(self.indexer)
+            
+            # Create sequence
+            clip_selections = create_sequence(
+                segments,
+                self.matcher,
+                allow_reuse=allow_reuse,
+                prefer_non_reused=prefer_non_reused
+            )
+            
+            if not clip_selections:
+                logger.error("No clips were selected")
+                return None
+            
+            # Save selections
+            selections_data = {
+                'clips': [
+                    {
+                        'segment_id': c.segment_id,
+                        'video_id': c.video_id,
+                        'trim_start': c.trim_start,
+                        'trim_end': c.trim_end,
+                        'similarity_score': c.similarity_score,
+                        'is_reused': c.is_reused
+                    }
+                    for c in clip_selections
+                ]
+            }
+            
+            with open(cache_file, 'w') as f:
+                json.dump(selections_data, f, indent=2)
+            
+            logger.info(f"Clip selection complete:")
+            logger.info(f"  Selected clips: {len(clip_selections)}")
+            reused_count = sum(1 for c in clip_selections if c.is_reused)
+            logger.info(f"  Reused clips: {reused_count}")
+            
+            return clip_selections
+        
+        except Exception as e:
+            logger.error(f"Error matching and sequencing: {e}")
+            return None
+    
+    def _assemble_video(self, clip_selections, transcription) -> Optional[Path]:
+        """Assemble and export final video"""
+        try:
+            self.assembler = VideoAssembler(use_ffmpeg=True)
+            builder = VideoSequenceBuilder(self.assembler, temp_dir=str(self.cache_dir / 'temp'))
+            
+            output_path = self.output_dir / 'output_video.mp4'
+            
+            success = builder.build_sequence(
+                clip_selections,
+                str(self.audio_file),
+                str(output_path)
+            )
+            
+            if success:
+                logger.info(f"Video assembly complete: {output_path}")
+                return output_path
+            else:
+                logger.error("Video assembly failed")
+                return None
+        
+        except Exception as e:
+            logger.error(f"Error assembling video: {e}")
+            return None
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description='Video Clip Selection and Sequencing via Language and Vision Models',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic usage
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output
+  
+  # With custom models
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
+    --whisper-model medium --llm-provider openai
+  
+  # Prevent clip reuse
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
+    --no-reuse
+        """
+    )
+    
+    parser.add_argument(
+        '--video-dir',
+        required=True,
+        help='Directory containing B-roll video clips'
+    )
+    parser.add_argument(
+        '--audio',
+        required=True,
+        help='Path to voice-over audio file'
+    )
+    parser.add_argument(
+        '--output',
+        required=True,
+        help='Output directory for the final video'
+    )
+    parser.add_argument(
+        '--cache-dir',
+        default='./cache',
+        help='Directory for caching intermediate results (default: ./cache)'
+    )
+    parser.add_argument(
+        '--whisper-model',
+        default='base',
+        choices=['tiny', 'base', 'small', 'medium', 'large'],
+        help='Whisper model size (default: base)'
+    )
+    parser.add_argument(
+        '--videoprism-model',
+        default='videoprism_public_v1_base',
+        choices=['videoprism_public_v1_base', 'videoprism_public_v1_large'],
+        help='VideoPrism model to use (default: videoprism_public_v1_base)'
+    )
+    parser.add_argument(
+        '--llm-provider',
+        default='openai',
+        choices=['openai', 'huggingface'],
+        help='LLM provider for script segmentation (default: openai)'
+    )
+    parser.add_argument(
+        '--no-reuse',
+        action='store_true',
+        help='Prevent reusing video clips'
+    )
+    parser.add_argument(
+        '--prefer-non-reused',
+        action='store_true',
+        default=True,
+        help='Prefer non-reused clips if available (default: True)'
+    )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose logging'
+    )
+    
+    args = parser.parse_args()
+    
+    # Set logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Validate inputs
+    if not Path(args.video_dir).exists():
+        logger.error(f"Video directory not found: {args.video_dir}")
+        sys.exit(1)
+    
+    if not Path(args.audio).exists():
+        logger.error(f"Audio file not found: {args.audio}")
+        sys.exit(1)
+    
+    # Run pipeline
+    pipeline = VideoSequencingPipeline(
+        video_dir=args.video_dir,
+        audio_file=args.audio,
+        output_dir=args.output,
+        cache_dir=args.cache_dir
+    )
+    
+    output_video = pipeline.run(
+        llm_provider=args.llm_provider,
+        whisper_model=args.whisper_model,
+        videoprism_model=args.videoprism_model,
+        allow_reuse=not args.no_reuse,
+        prefer_non_reused=args.prefer_non_reused
+    )
+    
+    if output_video:
+        sys.exit(0)
+    else:
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
