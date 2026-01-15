@@ -12,18 +12,18 @@ imageio>=2.9.0
 jax>=0.3.0
 jaxlib>=0.3.0
 flax>=0.4.0
-torch>=1.10.0
-torchvision>=0.11.0
-transformers>=4.20.0
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+accelerate>=0.20.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
 
 # VideoPrism (Video Embeddings)
 videoprism>=0.1.0
 
 # Whisper (Audio Transcription)
 openai-whisper>=20230314
-
-# LLM Integration
-openai>=1.0.0
 
 # Vector Search
 faiss-cpu>=1.7.0

@@ -3,7 +3,7 @@ Script Segmentation Module using Large Language Models
 
 This module is responsible for:
 1. Taking a transcribed script with timing information
-2. Using an LLM to split the script into semantic segments
+2. Using a local LLM to split the script into semantic segments
 3. Each segment represents one conceptual action or scene
 4. Providing timing information for each segment
 """
@@ -16,28 +16,17 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 
 try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
-
-try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
     import torch
 except ImportError:
     torch = None
     AutoTokenizer = None
     AutoModelForCausalLM = None
+    pipeline = None
 
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-
-class LLMProvider(Enum):
-    """Available LLM providers"""
-    OPENAI = "openai"
-    HUGGINGFACE = "huggingface"
-    LOCAL = "local"
 
 
 @dataclass
@@ -55,66 +44,60 @@ class ScriptSegment:
 
 class ScriptSegmenter:
     """
-    LLM-based script segmentation system.
+    Local LLM-based script segmentation system.
     
-    This class takes a transcribed script and uses an LLM to identify
+    This class takes a transcribed script and uses a local LLM to identify
     semantic boundaries and create meaningful segments for video matching.
+    
+    Default model: Llama-3.2-3B-Instruct (efficient and accurate for text tasks)
     """
     
     def __init__(
         self,
-        provider: LLMProvider = LLMProvider.OPENAI,
-        model_name: Optional[str] = None,
-        api_key: Optional[str] = None
+        model_name: str = "meta-llama/Llama-3.2-3B-Instruct",
+        device: str = "auto"
     ):
         """
-        Initialize the ScriptSegmenter.
+        Initialize the ScriptSegmenter with a local LLM.
         
         Args:
-            provider: LLM provider to use
-            model_name: Model name (e.g., 'gpt-4', 'mistral-7b')
-            api_key: API key for the provider (if needed)
+            model_name: Hugging Face model name (default: Llama-3.2-3B-Instruct)
+            device: Device to run on ('auto', 'cuda', 'cpu')
         """
-        self.provider = provider
-        self.model_name = model_name or self._get_default_model(provider)
-        self.api_key = api_key
-        
-        if provider == LLMProvider.OPENAI:
-            self._init_openai()
-        elif provider == LLMProvider.HUGGINGFACE:
-            self._init_huggingface()
-        else:
-            raise ValueError(f"Unsupported provider: {provider}")
-        
-        logger.info(f"ScriptSegmenter initialized with {provider.value} ({self.model_name})")
-    
-    def _get_default_model(self, provider: LLMProvider) -> str:
-        """Get default model for a provider"""
-        if provider == LLMProvider.OPENAI:
-            return "gpt-4-mini"
-        elif provider == LLMProvider.HUGGINGFACE:
-            return "mistralai/Mistral-7B-Instruct-v0.1"
-        return "unknown"
-    
-    def _init_openai(self):
-        """Initialize OpenAI client"""
-        if OpenAI is None:
-            raise ImportError("OpenAI not installed. Run: pip install openai")
-        
-        self.client = OpenAI(api_key=self.api_key)
-    
-    def _init_huggingface(self):
-        """Initialize Hugging Face model"""
         if torch is None or AutoTokenizer is None:
-            raise ImportError("Transformers not installed. Run: pip install transformers torch")
+            raise ImportError(
+                "Transformers and PyTorch not installed. "
+                "Run: pip install transformers torch"
+            )
         
-        logger.info(f"Loading Hugging Face model: {self.model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.model_name = model_name
+        self.device = device
+        
+        logger.info(f"Loading local LLM: {self.model_name}")
+        self._init_model()
+        logger.info(f"ScriptSegmenter initialized with {self.model_name}")
+    
+    def _init_model(self):
+        """Initialize the local Hugging Face model"""
+        logger.info(f"Loading tokenizer and model: {self.model_name}")
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name,
+            trust_remote_code=True
+        )
+        
+        # Set pad token if not set
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float16,
-            device_map="auto"
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map=self.device,
+            trust_remote_code=True
         )
+        
+        logger.info(f"Model loaded successfully on device: {self.model.device}")
     
     def segment_script(
         self,
@@ -199,7 +182,7 @@ class ScriptSegmenter:
         text_chunks: List[Dict]
     ) -> List[Dict]:
         """
-        Use LLM to identify semantic boundaries and segment descriptions.
+        Use local LLM to identify semantic boundaries and segment descriptions.
         
         Args:
             text_chunks: List of text chunks
@@ -212,10 +195,7 @@ class ScriptSegmenter:
         
         prompt = self._create_segmentation_prompt(combined_text)
         
-        if self.provider == LLMProvider.OPENAI:
-            response = self._query_openai(prompt)
-        else:
-            response = self._query_huggingface(prompt)
+        response = self._query_model(prompt)
         
         # Parse LLM response to extract segments
         segments = self._parse_segmentation_response(response, text_chunks)
@@ -227,7 +207,7 @@ class ScriptSegmenter:
         prompt = f"""You are an expert video editor and scriptwriter. Your task is to segment the following script into meaningful semantic chunks. Each chunk should represent a single conceptual action, scene, or idea.
 
 For each segment, provide:
-1. The chunk indices it covers (e.g., [0-2])
+1. The chunk indices it covers (e.g., [0, 1, 2])
 2. A brief description of what happens in this segment
 3. Key action words or verbs
 4. The type of action (e.g., "demonstration", "explanation", "transition")
@@ -258,38 +238,55 @@ Respond only with valid JSON."""
         
         return prompt
     
-    def _query_openai(self, prompt: str) -> str:
-        """Query OpenAI API"""
-        logger.info(f"Querying OpenAI with model {self.model_name}")
+    def _query_model(self, prompt: str) -> str:
+        """Query the local Hugging Face model"""
+        logger.info(f"Querying local LLM: {self.model_name}")
         
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant for video editing and script analysis."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=2000
-        )
+        # Format prompt for chat models
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant for video editing and script analysis."},
+            {"role": "user", "content": prompt}
+        ]
         
-        return response.choices[0].message.content
-    
-    def _query_huggingface(self, prompt: str) -> str:
-        """Query Hugging Face model"""
-        logger.info(f"Querying Hugging Face model {self.model_name}")
+        # Apply chat template if available
+        if hasattr(self.tokenizer, 'apply_chat_template'):
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            formatted_prompt = f"System: You are a helpful assistant for video editing and script analysis.\n\nUser: {prompt}\n\nAssistant:"
         
-        inputs = self.tokenizer(prompt, return_tensors="pt")
+        # Tokenize
+        inputs = self.tokenizer(
+            formatted_prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048
+        ).to(self.model.device)
         
+        # Generate
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_length=2000,
+                max_new_tokens=1500,
                 temperature=0.7,
                 do_sample=True,
-                top_p=0.95
+                top_p=0.95,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id
             )
         
+        # Decode
         response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract only the assistant's response
+        if "Assistant:" in response:
+            response = response.split("Assistant:")[-1].strip()
+        elif formatted_prompt in response:
+            response = response.replace(formatted_prompt, "").strip()
+        
         return response
     
     def _parse_segmentation_response(
@@ -313,29 +310,71 @@ Respond only with valid JSON."""
             json_end = response.rfind('}') + 1
             
             if json_start == -1 or json_end == 0:
-                logger.warning("Could not find JSON in LLM response, using default segmentation")
-                return self._create_default_segments(text_chunks)
+                logger.warning("No JSON found in LLM response, using fallback segmentation")
+                return self._fallback_segmentation(text_chunks)
             
             json_str = response[json_start:json_end]
-            data = json.loads(json_str)
+            parsed = json.loads(json_str)
             
-            segments = data.get('segments', [])
+            segments = []
+            for seg in parsed.get('segments', []):
+                chunk_indices = seg.get('chunk_indices', [])
+                
+                # Get the text chunks for this segment
+                segment_chunks = [text_chunks[i] for i in chunk_indices if i < len(text_chunks)]
+                
+                if not segment_chunks:
+                    continue
+                
+                # Combine text and timing
+                segment_text = ' '.join([c['text'] for c in segment_chunks])
+                start_time = segment_chunks[0]['start_time']
+                end_time = segment_chunks[-1]['end_time']
+                
+                segments.append({
+                    'text': segment_text,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'description': seg.get('description', ''),
+                    'keywords': seg.get('keywords', []),
+                    'action_type': seg.get('action_type', 'general')
+                })
+            
+            if not segments:
+                logger.warning("No valid segments parsed, using fallback")
+                return self._fallback_segmentation(text_chunks)
+            
             return segments
         
-        except Exception as e:
-            logger.error(f"Error parsing LLM response: {e}")
-            return self._create_default_segments(text_chunks)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response: {e}")
+            logger.warning("Using fallback segmentation")
+            return self._fallback_segmentation(text_chunks)
     
-    def _create_default_segments(self, text_chunks: List[Dict]) -> List[Dict]:
-        """Create default segments if LLM parsing fails"""
+    def _fallback_segmentation(self, text_chunks: List[Dict]) -> List[Dict]:
+        """
+        Fallback segmentation when LLM fails.
+        Simply treats each chunk as a segment.
+        
+        Args:
+            text_chunks: Original text chunks
+        
+        Returns:
+            List of segment dicts
+        """
+        logger.info("Using fallback segmentation (one segment per chunk)")
+        
         segments = []
-        for i, chunk in enumerate(text_chunks):
+        for chunk in text_chunks:
             segments.append({
-                'chunk_indices': [i],
-                'description': f"Segment {i+1}",
+                'text': chunk['text'],
+                'start_time': chunk['start_time'],
+                'end_time': chunk['end_time'],
+                'description': 'Auto-generated segment',
                 'keywords': [],
-                'action_type': 'unknown'
+                'action_type': 'general'
             })
+        
         return segments
     
     def _create_segments_with_timing(
@@ -347,59 +386,30 @@ Respond only with valid JSON."""
         Convert semantic segments to ScriptSegment objects with timing.
         
         Args:
-            semantic_segments: Segments from LLM
-            words_with_timing: Word timing information
+            semantic_segments: List of segment dicts from LLM
+            words_with_timing: Original word timing information
         
         Returns:
             List of ScriptSegment objects
         """
-        script_segments = []
+        segments = []
         
-        for seg_id, seg_data in enumerate(semantic_segments):
-            chunk_indices = seg_data.get('chunk_indices', [])
-            
-            # Find start and end times
-            if isinstance(chunk_indices, list) and len(chunk_indices) > 0:
-                # Assuming chunk_indices are indices into words
-                start_idx = chunk_indices[0] if isinstance(chunk_indices[0], int) else 0
-                end_idx = chunk_indices[-1] if isinstance(chunk_indices[-1], int) else len(words_with_timing) - 1
-                
-                # Clamp indices
-                start_idx = max(0, min(start_idx, len(words_with_timing) - 1))
-                end_idx = max(0, min(end_idx, len(words_with_timing) - 1))
-                
-                start_time = words_with_timing[start_idx].get('start_time', 0.0)
-                end_time = words_with_timing[end_idx].get('end_time', 0.0)
-            else:
-                start_time = 0.0
-                end_time = 0.0
-            
-            duration = end_time - start_time
-            
-            # Extract text for this segment
-            segment_words = [w.get('word', '') for w in words_with_timing[start_idx:end_idx+1]]
-            text = ' '.join(segment_words)
-            
-            script_segment = ScriptSegment(
-                segment_id=seg_id,
-                text=text,
-                start_time=start_time,
-                end_time=end_time,
-                duration=duration,
-                description=seg_data.get('description'),
-                keywords=seg_data.get('keywords', []),
-                action_type=seg_data.get('action_type')
+        for i, seg in enumerate(semantic_segments):
+            segment = ScriptSegment(
+                segment_id=i,
+                text=seg['text'],
+                start_time=seg['start_time'],
+                end_time=seg['end_time'],
+                duration=seg['end_time'] - seg['start_time'],
+                description=seg.get('description'),
+                keywords=seg.get('keywords'),
+                action_type=seg.get('action_type')
             )
-            
-            script_segments.append(script_segment)
+            segments.append(segment)
         
-        return script_segments
+        return segments
     
-    def save_segments(
-        self,
-        segments: List[ScriptSegment],
-        output_path: str
-    ):
+    def save_segments(self, segments: List[ScriptSegment], output_path: Path):
         """
         Save segments to a JSON file.
         
@@ -410,61 +420,65 @@ Respond only with valid JSON."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        data = {
-            'segments': [asdict(s) for s in segments],
-            'total_segments': len(segments),
-            'total_duration': sum(s.duration for s in segments)
-        }
+        segments_data = [asdict(seg) for seg in segments]
         
         with open(output_path, 'w') as f:
-            json.dump(data, f, indent=2)
+            json.dump(segments_data, f, indent=2)
         
         logger.info(f"Saved {len(segments)} segments to {output_path}")
     
-    def load_segments(self, json_path: str) -> List[ScriptSegment]:
+    @staticmethod
+    def load_segments(input_path: Path) -> List[ScriptSegment]:
         """
         Load segments from a JSON file.
         
         Args:
-            json_path: Path to the JSON file
+            input_path: Path to the JSON file
         
         Returns:
             List of ScriptSegment objects
         """
-        with open(json_path, 'r') as f:
-            data = json.load(f)
+        with open(input_path, 'r') as f:
+            segments_data = json.load(f)
         
-        segments = [ScriptSegment(**s) for s in data['segments']]
+        segments = [ScriptSegment(**seg) for seg in segments_data]
+        
+        logger.info(f"Loaded {len(segments)} segments from {input_path}")
         return segments
 
 
-if __name__ == '__main__':
-    # Example usage
-    segmenter = ScriptSegmenter(provider=LLMProvider.OPENAI)
-    
-    # Example words with timing
-    example_words = [
+def main():
+    """Example usage"""
+    # Example transcription data
+    words_with_timing = [
         {'word': 'Hello', 'start_time': 0.0, 'end_time': 0.5},
-        {'word': 'today', 'start_time': 0.5, 'end_time': 1.0},
-        {'word': 'I', 'start_time': 1.0, 'end_time': 1.3},
-        {'word': 'will', 'start_time': 1.3, 'end_time': 1.6},
-        {'word': 'show', 'start_time': 1.6, 'end_time': 2.0},
-        {'word': 'you', 'start_time': 2.0, 'end_time': 2.3},
-        {'word': 'how', 'start_time': 2.3, 'end_time': 2.6},
-        {'word': 'to', 'start_time': 2.6, 'end_time': 2.9},
-        {'word': 'plug', 'start_time': 2.9, 'end_time': 3.2},
-        {'word': 'in', 'start_time': 3.2, 'end_time': 3.5},
-        {'word': 'a', 'start_time': 3.5, 'end_time': 3.7},
-        {'word': 'USB', 'start_time': 3.7, 'end_time': 4.2},
-        {'word': 'cable', 'start_time': 4.2, 'end_time': 4.7},
+        {'word': 'world', 'start_time': 0.5, 'end_time': 1.0},
+        {'word': 'this', 'start_time': 1.0, 'end_time': 1.3},
+        {'word': 'is', 'start_time': 1.3, 'end_time': 1.5},
+        {'word': 'a', 'start_time': 1.5, 'end_time': 1.6},
+        {'word': 'test', 'start_time': 1.6, 'end_time': 2.0},
     ]
     
-    full_text = ' '.join([w['word'] for w in example_words])
+    full_text = "Hello world this is a test"
     
-    segments = segmenter.segment_script(full_text, example_words)
+    # Initialize segmenter with local LLM
+    segmenter = ScriptSegmenter()
     
+    # Segment the script
+    segments = segmenter.segment_script(full_text, words_with_timing, max_segment_words=3)
+    
+    # Print results
     for seg in segments:
-        print(f"Segment {seg.segment_id}: {seg.description}")
+        print(f"\nSegment {seg.segment_id}:")
         print(f"  Text: {seg.text}")
         print(f"  Time: {seg.start_time:.2f}s - {seg.end_time:.2f}s ({seg.duration:.2f}s)")
-        print()
+        print(f"  Description: {seg.description}")
+        print(f"  Keywords: {seg.keywords}")
+        print(f"  Action Type: {seg.action_type}")
+    
+    # Save segments
+    segmenter.save_segments(segments, Path("segments.json"))
+
+
+if __name__ == "__main__":
+    main()

@@ -22,7 +22,7 @@ from typing import Optional
 # Import modules
 from indexing import VideoIndexer
 from transcription import VoiceTranscriber, TranscriptionAnalyzer
-from segmentation import ScriptSegmenter, LLMProvider
+from segmentation import ScriptSegmenter
 from matching import VideoTextMatcher, create_sequence
 from assembly import VideoAssembler, VideoSequenceBuilder
 
@@ -74,7 +74,7 @@ class VideoSequencingPipeline:
     
     def run(
         self,
-        llm_provider: str = 'openai',
+        llm_model: str = 'meta-llama/Llama-3.2-3B-Instruct',
         whisper_model: str = 'base',
         videoprism_model: str = 'videoprism_public_v1_base',
         allow_reuse: bool = True,
@@ -84,7 +84,7 @@ class VideoSequencingPipeline:
         Run the complete pipeline.
         
         Args:
-            llm_provider: LLM provider ('openai' or 'huggingface')
+            llm_model: Local LLM model name (default: Llama-3.2-3B-Instruct)
             whisper_model: Whisper model size ('tiny', 'base', 'small', 'medium', 'large')
             videoprism_model: VideoPrism model to use
             allow_reuse: Whether to allow reusing video clips
@@ -111,7 +111,7 @@ class VideoSequencingPipeline:
             
             # Step 3: Segment script
             logger.info("\n[STEP 3] Segmenting script into semantic chunks...")
-            segments = self._segment_script(transcription, llm_provider)
+            segments = self._segment_script(transcription, llm_model)
             if segments is None:
                 return None
             
@@ -198,7 +198,7 @@ class VideoSequencingPipeline:
             logger.error(f"Error transcribing audio: {e}")
             return None
     
-    def _segment_script(self, transcription, llm_provider: str):
+    def _segment_script(self, transcription, llm_model: str):
         """Segment script into semantic chunks"""
         try:
             cache_file = self.cache_dir / 'segments.json'
@@ -206,12 +206,10 @@ class VideoSequencingPipeline:
             # Check if segments already exist
             if cache_file.exists():
                 logger.info("Loading cached segments")
-                self.segmenter = ScriptSegmenter(provider=LLMProvider(llm_provider))
-                return self.segmenter.load_segments(str(cache_file))
+                return ScriptSegmenter.load_segments(str(cache_file))
             
             # Segment script
-            provider = LLMProvider.OPENAI if llm_provider == 'openai' else LLMProvider.HUGGINGFACE
-            self.segmenter = ScriptSegmenter(provider=provider)
+            self.segmenter = ScriptSegmenter(model_name=llm_model)
             
             words_with_timing = [
                 {
@@ -333,7 +331,7 @@ Examples:
   
   # With custom models
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
-    --whisper-model medium --llm-provider openai
+    --whisper-model medium --llm-model meta-llama/Llama-3.2-3B-Instruct
   
   # Prevent clip reuse
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
@@ -374,10 +372,9 @@ Examples:
         help='VideoPrism model to use (default: videoprism_public_v1_base)'
     )
     parser.add_argument(
-        '--llm-provider',
-        default='openai',
-        choices=['openai', 'huggingface'],
-        help='LLM provider for script segmentation (default: openai)'
+        '--llm-model',
+        default='meta-llama/Llama-3.2-3B-Instruct',
+        help='Local LLM model for script segmentation (default: meta-llama/Llama-3.2-3B-Instruct)'
     )
     parser.add_argument(
         '--no-reuse',
@@ -420,7 +417,7 @@ Examples:
     )
     
     output_video = pipeline.run(
-        llm_provider=args.llm_provider,
+        llm_model=args.llm_model,
         whisper_model=args.whisper_model,
         videoprism_model=args.videoprism_model,
         allow_reuse=not args.no_reuse,

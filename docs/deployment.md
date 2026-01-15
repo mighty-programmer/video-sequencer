@@ -23,6 +23,8 @@ sudo apt-get install -y ffmpeg
 
 ### 1.2. Install Python Libraries
 
+**Note**: The first installation will download several large model files and may take 10-20 minutes.
+
 Create a virtual environment for the project (recommended):
 
 ```bash
@@ -63,6 +65,8 @@ This command will copy the `video-sequencer` directory and all its contents to t
 
 ## 3. Running the Application
 
+This system runs entirely locally and does **not** require an OpenAI API key.
+
 Once the project is uploaded, you can run the application from your Ubuntu server's terminal.
 
 1.  **Connect to your server via SSH:**
@@ -86,7 +90,7 @@ Once the project is uploaded, you can run the application from your Ubuntu serve
 4.  **Run the main script:**
 
     ```bash
-    python main.py --video-dir ./data/input/videos --audio ./data/input/audio/voiceover.mp3 --output ./data/output
+    python src/main.py --video-dir ./data/input/videos --audio ./data/input/audio/voiceover.mp3 --output ./data/output
     ```
 
     Make sure to replace the paths with the actual locations of your video directory, audio file, and desired output directory.
