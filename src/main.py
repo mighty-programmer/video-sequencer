@@ -43,7 +43,8 @@ class VideoSequencingPipeline:
         video_dir: str,
         audio_file: str,
         output_dir: str,
-        cache_dir: str = './cache'
+        cache_dir: str = './cache',
+        gpu_device: str = 'cuda:0'
     ):
         """
         Initialize the pipeline.
@@ -53,11 +54,13 @@ class VideoSequencingPipeline:
             audio_file: Path to voice-over audio file
             output_dir: Directory for output files
             cache_dir: Directory for caching intermediate results
+            gpu_device: GPU device to use (e.g., 'cuda:0', 'cuda:1', or 'cpu')
         """
         self.video_dir = Path(video_dir)
         self.audio_file = Path(audio_file)
         self.output_dir = Path(output_dir)
         self.cache_dir = Path(cache_dir)
+        self.gpu_device = gpu_device
         
         # Create directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -147,7 +150,8 @@ class VideoSequencingPipeline:
             
             self.indexer = VideoIndexer(
                 model_name=model_name,
-                index_dir=str(cache_file)
+                index_dir=str(cache_file),
+                device=self.gpu_device
             )
             
             # Try to load existing index
@@ -181,7 +185,10 @@ class VideoSequencingPipeline:
                 return self.transcriber.load_transcription(str(cache_file))
             
             # Transcribe audio
-            self.transcriber = VoiceTranscriber(model_size=model_size)
+            self.transcriber = VoiceTranscriber(
+                model_size=model_size,
+                device=self.gpu_device
+            )
             transcription = self.transcriber.transcribe(str(self.audio_file))
             
             # Save transcription
@@ -209,7 +216,10 @@ class VideoSequencingPipeline:
                 return ScriptSegmenter.load_segments(str(cache_file))
             
             # Segment script
-            self.segmenter = ScriptSegmenter(model_name=llm_model)
+            self.segmenter = ScriptSegmenter(
+                model_name=llm_model,
+                device=self.gpu_device
+            )
             
             words_with_timing = [
                 {
@@ -388,6 +398,11 @@ Examples:
         help='Prefer non-reused clips if available (default: True)'
     )
     parser.add_argument(
+        '--gpu-device',
+        default='cuda:0',
+        help='GPU device to use (e.g., cuda:0, cuda:1, cuda:2, cuda:3, or cpu) (default: cuda:0)'
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -413,7 +428,8 @@ Examples:
         video_dir=args.video_dir,
         audio_file=args.audio,
         output_dir=args.output,
-        cache_dir=args.cache_dir
+        cache_dir=args.cache_dir,
+        gpu_device=args.gpu_device
     )
     
     output_video = pipeline.run(

@@ -61,7 +61,7 @@ class VoiceTranscriber:
     def __init__(
         self,
         model_size: str = 'base',
-        device: str = 'cuda',
+        device: str = 'cuda:0',
         language: Optional[str] = None
     ):
         """
@@ -69,19 +69,29 @@ class VoiceTranscriber:
         
         Args:
             model_size: Whisper model size ('tiny', 'base', 'small', 'medium', 'large')
-            device: Device to use ('cuda' or 'cpu')
+            device: Device to use ('cuda:0', 'cuda:1', etc., or 'cpu')
             language: Language code (e.g., 'en' for English). If None, auto-detect.
         """
         self.model_size = model_size
         self.device = device
         self.language = language
         
+        # Set device for Whisper (convert cuda:0 to cuda for Whisper compatibility)
+        whisper_device = 'cuda' if 'cuda' in device else 'cpu'
+        
         # Load Whisper model
-        logger.info(f"Loading Whisper model: {model_size}")
+        logger.info(f"Loading Whisper model: {model_size} on {device}")
         if whisper is None:
             raise ImportError("Whisper not installed. Run: pip install openai-whisper")
         
-        self.model = whisper.load_model(model_size, device=device)
+        # Set CUDA device if specified
+        if 'cuda' in device and ':' in device:
+            import torch
+            gpu_id = int(device.split(':')[1])
+            torch.cuda.set_device(gpu_id)
+            logger.info(f"Set PyTorch to use GPU {gpu_id}")
+        
+        self.model = whisper.load_model(model_size, device=whisper_device)
         logger.info("Whisper model loaded successfully")
     
     def load_audio(self, audio_path: str) -> Tuple[np.ndarray, int]:

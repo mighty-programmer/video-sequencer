@@ -55,14 +55,14 @@ class ScriptSegmenter:
     def __init__(
         self,
         model_name: str = "meta-llama/Llama-3.2-3B-Instruct",
-        device: str = "auto"
+        device: str = "cuda:0"
     ):
         """
         Initialize the ScriptSegmenter with a local LLM.
         
         Args:
             model_name: Hugging Face model name (default: Llama-3.2-3B-Instruct)
-            device: Device to run on ('auto', 'cuda', 'cpu')
+            device: Device to run on ('cuda:0', 'cuda:1', etc., or 'cpu')
         """
         if torch is None or AutoTokenizer is None:
             raise ImportError(
@@ -90,12 +90,18 @@ class ScriptSegmenter:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
+        # Use specific GPU device instead of device_map="auto"
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map=self.device,
             trust_remote_code=True
         )
+        
+        # Move model to specified device
+        if torch.cuda.is_available() and 'cuda' in self.device:
+            self.model = self.model.to(self.device)
+        elif self.device == 'cpu':
+            self.model = self.model.to('cpu')
         
         logger.info(f"Model loaded successfully on device: {self.model.device}")
     

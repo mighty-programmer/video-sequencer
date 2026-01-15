@@ -60,7 +60,7 @@ class VideoIndexer:
         self,
         model_name: str = 'videoprism_public_v1_base',
         index_dir: str = './video_index',
-        device: str = 'gpu'
+        device: str = 'cuda:0'
     ):
         """
         Initialize the VideoIndexer.
@@ -68,12 +68,18 @@ class VideoIndexer:
         Args:
             model_name: VideoPrism model to use ('videoprism_public_v1_base' or 'videoprism_public_v1_large')
             index_dir: Directory to store the FAISS index and metadata
-            device: Device to use ('gpu' or 'cpu')
+            device: Device to use ('cuda:0', 'cuda:1', etc., or 'cpu')
         """
         self.model_name = model_name
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
+        
+        # Set JAX to use specific GPU
+        if 'cuda' in device:
+            gpu_id = int(device.split(':')[1]) if ':' in device else 0
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+            logger.info(f"Setting JAX to use GPU {gpu_id}")
         
         # Load VideoPrism model
         logger.info(f"Loading VideoPrism model: {model_name}")

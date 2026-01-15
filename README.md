@@ -51,7 +51,7 @@ The system is designed as a modular pipeline:
 The main application is controlled via the `main.py` script. Here are the available options:
 
 ```
-usage: main.py [-h] --video-dir VIDEO_DIR --audio AUDIO --output OUTPUT [--cache-dir CACHE_DIR] [--whisper-model {tiny,base,small,medium,large}] [--videoprism-model {videoprism_public_v1_base,videoprism_public_v1_large}] [--llm-model LLM_MODEL] [--no-reuse] [--prefer-non-reused] [--verbose]
+usage: main.py [-h] --video-dir VIDEO_DIR --audio AUDIO --output OUTPUT [--cache-dir CACHE_DIR] [--whisper-model {tiny,base,small,medium,large}] [--videoprism-model {videoprism_public_v1_base,videoprism_public_v1_large}] [--llm-model LLM_MODEL] [--gpu-device GPU_DEVICE] [--no-reuse] [--prefer-non-reused] [--verbose]
 
 Video Clip Selection and Sequencing via Language and Vision Models
 
@@ -69,6 +69,8 @@ optional arguments:
                         VideoPrism model to use (default: videoprism_public_v1_base)
   --llm-model LLM_MODEL
                         Local LLM model for script segmentation (default: meta-llama/Llama-3.2-3B-Instruct)
+  --gpu-device GPU_DEVICE
+                        GPU device to use (e.g., cuda:0, cuda:1, or cpu) (default: cuda:0)
   --no-reuse            Prevent reusing video clips
   --prefer-non-reused   Prefer non-reused clips if available (default: True)
   --verbose             Enable verbose logging
@@ -85,7 +87,7 @@ python main.py --video-dir ./data/videos --audio ./data/voiceover.mp3 --output .
 **Using a larger Whisper model and a different local LLM:**
 
 ```bash
-python main.py --video-dir ./data/videos --audio ./data/voiceover.mp3 --output ./output --whisper-model medium --llm-model google/gemma-2b-it
+python main.py --video-dir ./data/videos --audio ./data/voiceover.mp3 --output ./output --whisper-model medium --llm-model google/gemma-2b-it --gpu-device cuda:1
 ```
 
 ## License
