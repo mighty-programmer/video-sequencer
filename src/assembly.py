@@ -135,16 +135,16 @@ class VideoAssembler:
         start_time: float,
         end_time: float
     ) -> bool:
-        \"\"\"Trim video using MoviePy\"\"\"
+        """Trim video using MoviePy"""
         try:
             clip = VideoFileClip(input_path)
             trimmed = clip.subclip(start_time, end_time)
             trimmed.write_videofile(output_path, verbose=False, logger=None)
             clip.close()
-            logger.info(f\"Successfully trimmed to {output_path}\")
+            logger.info(f"Successfully trimmed to {output_path}")
             return True
         except Exception as e:
-            logger.error(f\"MoviePy error: {e}\")
+            logger.error(f"MoviePy error: {e}")
             return False
     
     def concatenate_videos(
@@ -152,7 +152,7 @@ class VideoAssembler:
         video_paths: List[str],
         output_path: str
     ) -> bool:
-        \"\"\"
+        """
         Concatenate multiple video clips.
         
         Args:
@@ -161,8 +161,8 @@ class VideoAssembler:
         
         Returns:
             True if successful, False otherwise
-        \"\"\"
-        logger.info(f\"Concatenating {len(video_paths)} videos\")
+        """
+        logger.info(f"Concatenating {len(video_paths)} videos")
         
         try:
             if self.use_ffmpeg:
@@ -170,7 +170,7 @@ class VideoAssembler:
             else:
                 return self._concatenate_videos_moviepy(video_paths, output_path)
         except Exception as e:
-            logger.error(f\"Error concatenating videos: {e}\")
+            logger.error(f"Error concatenating videos: {e}")
             return False
     
     def _concatenate_videos_ffmpeg(
@@ -178,13 +178,13 @@ class VideoAssembler:
         video_paths: List[str],
         output_path: str
     ) -> bool:
-        \"\"\"Concatenate videos using FFmpeg\"\"\"
+        """Concatenate videos using FFmpeg"""
         # Create a concat demuxer file
         concat_file = Path(output_path).parent / 'concat_list.txt'
         
         with open(concat_file, 'w') as f:
             for video_path in video_paths:
-                f.write(f\"file '{Path(video_path).absolute()}'\\n\")
+                f.write(f"file '{Path(video_path).absolute()}'\\n")
         
         cmd = [
             'ffmpeg',
@@ -198,14 +198,14 @@ class VideoAssembler:
         
         try:
             subprocess.run(cmd, capture_output=True, check=True, timeout=600)
-            logger.info(f\"Successfully concatenated to {output_path}\")
+            logger.info(f"Successfully concatenated to {output_path}")
             concat_file.unlink()  # Remove concat file
             return True
         except subprocess.TimeoutExpired:
-            logger.error(\"Concatenation operation timed out\")
+            logger.error("Concatenation operation timed out")
             return False
         except subprocess.CalledProcessError as e:
-            logger.error(f\"FFmpeg error: {e.stderr.decode()}\")
+            logger.error(f"FFmpeg error: {e.stderr.decode()}")
             return False
     
     def _concatenate_videos_moviepy(
@@ -213,7 +213,7 @@ class VideoAssembler:
         video_paths: List[str],
         output_path: str
     ) -> bool:
-        \"\"\"Concatenate videos using MoviePy\"\"\"
+        """Concatenate videos using MoviePy"""
         try:
             clips = [VideoFileClip(path) for path in video_paths]
             final_clip = concatenate_videoclips(clips)
@@ -222,10 +222,10 @@ class VideoAssembler:
             for clip in clips:
                 clip.close()
             
-            logger.info(f\"Successfully concatenated to {output_path}\")
+            logger.info(f"Successfully concatenated to {output_path}")
             return True
         except Exception as e:
-            logger.error(f\"MoviePy error: {e}\")
+            logger.error(f"MoviePy error: {e}")
             return False
     
     def add_audio(
@@ -235,7 +235,7 @@ class VideoAssembler:
         output_path: str,
         audio_start: float = 0.0
     ) -> bool:
-        \"\"\"
+        """
         Add audio track to a video.
         
         Args:
@@ -246,8 +246,8 @@ class VideoAssembler:
         
         Returns:
             True if successful, False otherwise
-        \"\"\"
-        logger.info(f\"Adding audio from {audio_path} to {video_path}\")
+        """
+        logger.info(f"Adding audio from {audio_path} to {video_path}")
         
         try:
             if self.use_ffmpeg:
@@ -255,7 +255,7 @@ class VideoAssembler:
             else:
                 return self._add_audio_moviepy(video_path, audio_path, output_path, audio_start)
         except Exception as e:
-            logger.error(f\"Error adding audio: {e}\")
+            logger.error(f"Error adding audio: {e}")
             return False
     
     def _add_audio_ffmpeg(
@@ -265,7 +265,7 @@ class VideoAssembler:
         output_path: str,
         audio_start: float = 0.0
     ) -> bool:
-        \"\"\"Add audio using FFmpeg\"\"\"
+        """Add audio using FFmpeg"""
         cmd = [
             'ffmpeg',
             '-i', video_path,
@@ -281,13 +281,13 @@ class VideoAssembler:
         
         try:
             subprocess.run(cmd, capture_output=True, check=True, timeout=300)
-            logger.info(f\"Successfully added audio to {output_path}\")
+            logger.info(f"Successfully added audio to {output_path}")
             return True
         except subprocess.TimeoutExpired:
-            logger.error(\"Audio addition operation timed out\")
+            logger.error("Audio addition operation timed out")
             return False
         except subprocess.CalledProcessError as e:
-            logger.error(f\"FFmpeg error: {e.stderr.decode()}\")
+            logger.error(f"FFmpeg error: {e.stderr.decode()}")
             return False
     
     def _add_audio_moviepy(
@@ -297,7 +297,7 @@ class VideoAssembler:
         output_path: str,
         audio_start: float = 0.0
     ) -> bool:
-        \"\"\"Add audio using MoviePy\"\"\"
+        """Add audio using MoviePy"""
         try:
             video = VideoFileClip(video_path)
             audio = AudioFileClip(audio_path)
@@ -312,14 +312,14 @@ class VideoAssembler:
             video.close()
             audio.close()
             
-            logger.info(f\"Successfully added audio to {output_path}\")
+            logger.info(f"Successfully added audio to {output_path}")
             return True
         except Exception as e:
-            logger.error(f\"MoviePy error: {e}\")
+            logger.error(f"MoviePy error: {e}")
             return False
     
     def get_video_info(self, video_path: str) -> Optional[Dict]:
-        \"\"\"
+        """
         Get information about a video file.
         
         Args:
@@ -327,7 +327,7 @@ class VideoAssembler:
         
         Returns:
             Dictionary with video info or None
-        \"\"\"
+        """
         try:
             cmd = [
                 'ffprobe',
@@ -350,24 +350,24 @@ class VideoAssembler:
                     'duration': float(stream.get('duration', 0))
                 }
         except Exception as e:
-            logger.error(f\"Error getting video info: {e}\")
+            logger.error(f"Error getting video info: {e}")
         
         return None
 
 
 class VideoSequenceBuilder:
-    \"\"\"
+    """
     Builds the final video sequence from clip selections.
-    \"\"\"
+    """
     
     def __init__(self, assembler: VideoAssembler, temp_dir: str = './temp'):
-        \"\"\"
+        """
         Initialize the VideoSequenceBuilder.
         
         Args:
             assembler: VideoAssembler instance
             temp_dir: Directory for temporary files
-        \"\"\"
+        """
         self.assembler = assembler
         self.temp_dir = Path(temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -378,7 +378,7 @@ class VideoSequenceBuilder:
         audio_path: str,
         output_path: str
     ) -> bool:
-        \"\"\"
+        """
         Build the final video sequence.
         
         Args:
@@ -388,14 +388,14 @@ class VideoSequenceBuilder:
         
         Returns:
             True if successful, False otherwise
-        \"\"\"
-        logger.info(f\"Building video sequence with {len(clip_selections)} clips\")
+        """
+        logger.info(f"Building video sequence with {len(clip_selections)} clips")
         
         try:
             # Step 1: Trim all clips
             trimmed_clips = []
             for i, clip_sel in enumerate(clip_selections):
-                trimmed_path = self.temp_dir / f\"clip_{i:03d}.mp4\"
+                trimmed_path = self.temp_dir / f"clip_{i:03d}.mp4"
                 
                 success = self.assembler.trim_video(
                     clip_sel.video_file_path,
@@ -407,7 +407,7 @@ class VideoSequenceBuilder:
                 if success:
                     trimmed_clips.append(str(trimmed_path))
                 else:
-                    logger.error(f\"Failed to trim clip {i}\")
+                    logger.error(f"Failed to trim clip {i}")
                     return False
             
             # Step 2: Concatenate clips
@@ -415,7 +415,7 @@ class VideoSequenceBuilder:
             success = self.assembler.concatenate_videos(trimmed_clips, str(concatenated_path))
             
             if not success:
-                logger.error(\"Failed to concatenate clips\")
+                logger.error("Failed to concatenate clips")
                 return False
             
             # Step 3: Add audio
@@ -426,25 +426,25 @@ class VideoSequenceBuilder:
             )
             
             if success:
-                logger.info(f\"Successfully built video sequence: {output_path}\")
+                logger.info(f"Successfully built video sequence: {output_path}")
                 self._cleanup_temp_files()
                 return True
             else:
-                logger.error(\"Failed to add audio\")
+                logger.error("Failed to add audio")
                 return False
         
         except Exception as e:
-            logger.error(f\"Error building sequence: {e}\")
+            logger.error(f"Error building sequence: {e}")
             return False
     
     def _cleanup_temp_files(self):
-        \"\"\"Clean up temporary files\"\"\"
+        """Clean up temporary files"""
         try:
             import shutil
             shutil.rmtree(self.temp_dir)
-            logger.info(\"Cleaned up temporary files\")
+            logger.info("Cleaned up temporary files")
         except Exception as e:
-            logger.warning(f\"Could not clean up temp files: {e}\")
+            logger.warning(f"Could not clean up temp files: {e}")
 
 
 if __name__ == '__main__':
@@ -453,4 +453,4 @@ if __name__ == '__main__':
     
     # Get video info
     info = assembler.get_video_info('./data/input/videos/sample.mp4')
-    print(f\"Video info: {info}\")
+    print(f"Video info: {info}")
