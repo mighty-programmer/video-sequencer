@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 
 @dataclass
 class ClipSelection:
-    \"\"\"Represents a selected video clip for a script segment\"\"\"
+    """Represents a selected video clip for a script segment"""
     segment_id: int
     video_id: str
     video_file_path: str
@@ -49,12 +49,12 @@ class ClipSelection:
 
 
 class VideoTextMatcher:
-    \"\"\"
+    """
     Matches script segments to video clips using semantic similarity.
     
     This class uses VideoPrism embeddings to find the best video clips
     for each script segment, considering motion, context, and timing.
-    \"\"\"
+    """
     
     def __init__(
         self,
@@ -62,31 +62,31 @@ class VideoTextMatcher:
         model_name: str = 'videoprism_lvt_public_v1_base',
         device: str = 'gpu'
     ):
-        \"\"\"
+        """
         Initialize the VideoTextMatcher.
         
         Args:
             video_indexer: VideoIndexer instance with indexed videos
             model_name: VideoPrism video-text model to use
             device: Device to use ('gpu' or 'cpu')
-        \"\"\"
+        """
         self.video_indexer = video_indexer
         self.model_name = model_name
         self.device = device
         
         # Load VideoPrism video-text model
-        logger.info(f\"Loading VideoPrism video-text model: {model_name}\")
+        logger.info(f"Loading VideoPrism video-text model: {model_name}")
         if vp is None:
-            raise ImportError(\"VideoPrism not installed. Run: pip install videoprism\")
+            raise ImportError("VideoPrism not installed. Run: pip install videoprism")
         
         self.flax_model = vp.get_model(model_name)
         self.loaded_state = vp.load_pretrained_weights(model_name)
         self.text_tokenizer = vp.load_text_tokenizer('c4_en')
         
-        logger.info(\"VideoTextMatcher initialized successfully\")
+        logger.info("VideoTextMatcher initialized successfully")
     
     def get_text_embedding(self, text: str) -> np.ndarray:
-        \"\"\"
+        """
         Get embedding for a text query.
         
         Args:
@@ -94,7 +94,7 @@ class VideoTextMatcher:
         
         Returns:
             Text embedding array
-        \"\"\"
+        """
         import jax
         
         text_ids, text_paddings = vp.tokenize_texts(self.text_tokenizer, [text])
@@ -121,7 +121,7 @@ class VideoTextMatcher:
         allow_reuse: bool = True,
         used_videos: Optional[Set[str]] = None
     ) -> List[Dict]:
-        \"\"\"
+        """
         Find the best matching video clips for a script segment.
         
         Args:
@@ -133,11 +133,11 @@ class VideoTextMatcher:
         
         Returns:
             List of candidate matches with scores
-        \"\"\"
+        """
         if used_videos is None:
             used_videos = set()
         
-        logger.info(f\"Matching segment: '{segment_text[:50]}...' (duration: {segment_duration:.2f}s)\")
+        logger.info(f"Matching segment: '{segment_text[:50]}...' (duration: {segment_duration:.2f}s)")
         
         # Get text embedding
         text_embedding = self.get_text_embedding(segment_text)
@@ -184,7 +184,7 @@ class VideoTextMatcher:
         return candidates[:k]
     
     def _calculate_motion_score(self, metadata, segment_duration: float) -> float:
-        \"\"\"
+        """
         Calculate motion score based on video duration match.
         
         A video is scored higher if its duration is close to the segment duration,
@@ -196,7 +196,7 @@ class VideoTextMatcher:
         
         Returns:
             Motion score (0-1)
-        \"\"\"
+        """
         video_duration = metadata.duration
         
         # Ideal video is 1.5x to 3x the segment duration
@@ -220,7 +220,7 @@ class VideoTextMatcher:
             return 1.0
     
     def _calculate_context_score(self, segment_text: str, metadata) -> float:
-        \"\"\"
+        """
         Calculate context score based on segment keywords.
         
         Args:
@@ -229,7 +229,7 @@ class VideoTextMatcher:
         
         Returns:
             Context score (0-1)
-        \"\"\"
+        """
         # Extract keywords from segment text
         keywords = self._extract_keywords(segment_text)
         
@@ -239,7 +239,7 @@ class VideoTextMatcher:
         return 0.5
     
     def _extract_keywords(self, text: str) -> List[str]:
-        \"\"\"
+        """
         Extract keywords from text.
         
         Args:
@@ -247,7 +247,7 @@ class VideoTextMatcher:
         
         Returns:
             List of keywords
-        \"\"\"
+        """
         # Simple keyword extraction (can be improved with NLP)
         stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'is', 'are', 'was', 'were'}
         
@@ -262,7 +262,7 @@ class VideoTextMatcher:
         segment_duration: float,
         prefer_non_reused: bool = True
     ) -> Optional[Dict]:
-        \"\"\"
+        """
         Select the best clip from candidates.
         
         Args:
@@ -272,7 +272,7 @@ class VideoTextMatcher:
         
         Returns:
             Best candidate or None
-        \"\"\"
+        """
         if not candidates:
             return None
         
@@ -303,7 +303,7 @@ class VideoTextMatcher:
         video_duration: float,
         segment_duration: float
     ) -> Tuple[float, float]:
-        \"\"\"
+        """
         Calculate trim start and end times for a video clip.
         
         Args:
@@ -312,7 +312,7 @@ class VideoTextMatcher:
         
         Returns:
             Tuple of (trim_start, trim_end)
-        \"\"\"
+        """
         if video_duration <= segment_duration:
             # Video is shorter or equal to segment, use entire video
             return 0.0, video_duration
@@ -326,128 +326,67 @@ class VideoTextMatcher:
         return trim_start, trim_end
 
 
-class SequenceOptimizer:
-    \"\"\"
-    Optimizes the sequence of video clips.
-    
-    Considers factors like:
-    - Minimizing clip reuse
-    - Maintaining visual continuity
-    - Ensuring timing accuracy
-    \"\"\"
-    
-    def __init__(self, matcher: VideoTextMatcher):
-        \"\"\"
-        Initialize the SequenceOptimizer.
-        
-        Args:
-            matcher: VideoTextMatcher instance
-        \"\"\"
-        self.matcher = matcher
-    
-    def optimize_sequence(
-        self,
-        segments: List,
-        clip_selections: List[ClipSelection]
-    ) -> List[ClipSelection]:
-        \"\"\"
-        Optimize the sequence of selected clips.
-        
-        Args:
-            segments: List of ScriptSegment objects
-            clip_selections: Initial clip selections
-        
-        Returns:
-            Optimized clip selections
-        \"\"\"
-        logger.info(f\"Optimizing sequence of {len(clip_selections)} clips\")
-        
-        # Count reuse
-        video_usage = {}
-        for clip in clip_selections:
-            video_usage[clip.video_id] = video_usage.get(clip.video_id, 0) + 1
-        
-        reused_count = sum(1 for count in video_usage.values() if count > 1)
-        logger.info(f\"Clip reuse: {reused_count} videos used multiple times\")
-        
-        return clip_selections
-
-
 def create_sequence(
-    segments: List,
-    matcher: VideoTextMatcher,
+    script_segments: List[Dict],
+    video_matcher: VideoTextMatcher,
     allow_reuse: bool = True,
     prefer_non_reused: bool = True
 ) -> List[ClipSelection]:
-    \"\"\"
-    Create a sequence of video clips matching script segments.
+    """
+    Create the final video sequence.
     
     Args:
-        segments: List of ScriptSegment objects
-        matcher: VideoTextMatcher instance
-        allow_reuse: Whether to allow reusing videos
+        script_segments: List of script segments with text and duration
+        video_matcher: Initialized VideoTextMatcher instance
+        allow_reuse: Whether to allow reusing video clips
         prefer_non_reused: Prefer non-reused clips if possible
     
     Returns:
-        List of ClipSelection objects
-    \"\"\"
-    logger.info(f\"Creating sequence for {len(segments)} segments\")
+        List of ClipSelection objects representing the final sequence
+    """
+    sequence = []
+    used_videos = set()
     
-    clip_selections = []
-    used_videos: Set[str] = set()
-    
-    for segment in segments:
-        logger.info(f\"Processing segment {segment.segment_id}: {segment.description}\")
+    for i, segment in enumerate(script_segments):
+        logger.info(f"Processing segment {i+1}/{len(script_segments)}")
         
-        # Find matching videos
-        candidates = matcher.match_segment_to_videos(
-            segment_text=segment.text,
-            segment_duration=segment.duration,
-            k=5,
+        candidates = video_matcher.match_segment_to_videos(
+            segment_text=segment['text'],
+            segment_duration=segment['duration'],
+            k=10,
             allow_reuse=allow_reuse,
             used_videos=used_videos
         )
         
-        if not candidates:
-            logger.warning(f\"No candidates found for segment {segment.segment_id}\")
-            continue
-        
-        # Select best clip
-        best_clip = matcher.select_best_clip(
+        best_clip_data = video_matcher.select_best_clip(
             candidates,
-            segment.duration,
+            segment['duration'],
             prefer_non_reused=prefer_non_reused
         )
         
-        if best_clip:
-            is_reused = best_clip['video_id'] in used_videos
-            
-            clip_selection = ClipSelection(
-                segment_id=segment.segment_id,
-                video_id=best_clip['video_id'],
-                video_file_path=best_clip['file_path'],
-                start_time=segment.start_time,
-                end_time=segment.end_time,
-                duration=segment.duration,
-                trim_start=best_clip['trim_start'],
-                trim_end=best_clip['trim_end'],
-                trim_duration=best_clip['trim_duration'],
-                similarity_score=best_clip['similarity_score'],
-                motion_score=best_clip['motion_score'],
-                context_score=best_clip['context_score'],
-                combined_score=best_clip['combined_score'],
-                is_reused=is_reused
+        if best_clip_data:
+            selection = ClipSelection(
+                segment_id=i,
+                video_id=best_clip_data['video_id'],
+                video_file_path=best_clip_data['file_path'],
+                start_time=0.0, # Placeholder, will be set during assembly
+                end_time=0.0, # Placeholder
+                duration=segment['duration'],
+                trim_start=best_clip_data['trim_start'],
+                trim_end=best_clip_data['trim_end'],
+                trim_duration=best_clip_data['trim_duration'],
+                similarity_score=best_clip_data['similarity_score'],
+                motion_score=best_clip_data['motion_score'],
+                context_score=best_clip_data['context_score'],
+                combined_score=best_clip_data['combined_score'],
+                is_reused=best_clip_data['is_reused']
             )
-            
-            clip_selections.append(clip_selection)
-            used_videos.add(best_clip['video_id'])
-            
-            logger.info(f\"Selected {best_clip['video_id']} (score: {best_clip['combined_score']:.3f})\")
+            sequence.append(selection)
+            used_videos.add(selection.video_id)
+            logger.info(f"  -> Matched with video: {selection.video_id} (Score: {selection.combined_score:.2f})")
+        else:
+            logger.warning(f"  -> No suitable clip found for segment {i+1}")
+            # Optionally, add a placeholder or blank clip
+            # For now, we just skip it
     
-    logger.info(f\"Created sequence with {len(clip_selections)} clips\")
-    return clip_selections
-
-
-if __name__ == '__main__':
-    # Example usage would require initialized indexer and matcher
-    pass
+    return sequence
