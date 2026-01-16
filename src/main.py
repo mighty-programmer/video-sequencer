@@ -16,6 +16,7 @@ import argparse
 import logging
 import json
 import sys
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,13 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def check_ffmpeg():
+    """Check if FFmpeg is available"""
+    if shutil.which('ffmpeg') is None:
+        return False
+    return True
 
 
 class VideoSequencingPipeline:
@@ -81,7 +89,8 @@ class VideoSequencingPipeline:
         whisper_model: str = 'base',
         videoprism_model: str = 'videoprism_public_v1_base',
         allow_reuse: bool = True,
-        prefer_non_reused: bool = True
+        prefer_non_reused: bool = True,
+        use_simple_segmentation: bool = False
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -92,6 +101,7 @@ class VideoSequencingPipeline:
             videoprism_model: VideoPrism model to use
             allow_reuse: Whether to allow reusing video clips
             prefer_non_reused: Prefer non-reused clips if possible
+            use_simple_segmentation: Use simple rule-based segmentation instead of LLM
         
         Returns:
             Path to output video or None if failed
@@ -100,6 +110,15 @@ class VideoSequencingPipeline:
             logger.info("=" * 80)
             logger.info("Starting Video Sequencing Pipeline")
             logger.info("=" * 80)
+            
+            # Check FFmpeg availability
+            if not check_ffmpeg():
+                logger.error("FFmpeg is not installed or not in PATH.")
+                logger.error("Please install FFmpeg:")
+                logger.error("  Ubuntu/Debian: sudo apt-get install ffmpeg")
+                logger.error("  macOS: brew install ffmpeg")
+                logger.error("  Or download from: https://ffmpeg.org/download.html")
+                return None
             
             # Step 1: Index videos
             logger.info("\n[STEP 1] Indexing B-roll videos...")
@@ -114,7 +133,7 @@ class VideoSequencingPipeline:
             
             # Step 3: Segment script
             logger.info("\n[STEP 3] Segmenting script into semantic chunks...")
-            segments = self._segment_script(transcription, llm_model)
+            segments = self._segment_script(transcription, llm_model, use_simple_segmentation)
             if segments is None:
                 return None
             
@@ -157,6 +176,22 @@ class VideoSequencingPipeline:
             # Try to load existing index
             if self.indexer.load_index():
                 logger.info(f"Loaded existing video index with {len(self.indexer.metadata_list)} videos")
+                
+                # Check if there are new videos to index
+                video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
+                video_files = [
+                    f for f in self.video_dir.rglob('*')
+                    if f.suffix.lower() in video_extensions
+                ]
+                
+                existing_ids = set(self.indexer.video_id_to_idx.keys())
+                new_videos = [f for f in video_files if f.stem not in existing_ids]
+                
+                if new_videos:
+                    logger.info(f"Found {len(new_videos)} new videos to index")
+                    num_indexed = self.indexer.index_videos(str(self.video_dir))
+                    logger.info(f"Indexed {num_indexed} new videos")
+                
                 return True
             
             # Create new index
@@ -205,7 +240,7 @@ class VideoSequencingPipeline:
             logger.error(f"Error transcribing audio: {e}")
             return None
     
-    def _segment_script(self, transcription, llm_model: str):
+    def _segment_script(self, transcription, llm_model: str, use_simple_segmentation: bool = False):
         """Segment script into semantic chunks"""
         try:
             cache_file = self.cache_dir / 'segments.json'
@@ -218,7 +253,8 @@ class VideoSequencingPipeline:
             # Segment script
             self.segmenter = ScriptSegmenter(
                 model_name=llm_model,
-                device=self.gpu_device
+                device=self.gpu_device,
+                use_simple_segmentation=use_simple_segmentation
             )
             
             words_with_timing = [
@@ -241,7 +277,8 @@ class VideoSequencingPipeline:
             logger.info(f"Script segmentation complete:")
             logger.info(f"  Segments: {len(segments)}")
             for seg in segments:
-                logger.info(f"    [{seg.segment_id}] {seg.description} ({seg.duration:.2f}s)")
+                desc = seg.description[:50] if seg.description else "No description"
+                logger.info(f"    [{seg.segment_id}] {desc}... ({seg.duration:.2f}s)")
             
             return segments
         
@@ -262,9 +299,20 @@ class VideoSequencingPipeline:
             # Initialize matcher
             self.matcher = VideoTextMatcher(self.indexer)
             
+            # Convert segments to dict format expected by create_sequence
+            segment_dicts = [
+                {
+                    'text': seg.text,
+                    'duration': seg.duration,
+                    'start_time': seg.start_time,
+                    'end_time': seg.end_time
+                }
+                for seg in segments
+            ]
+            
             # Create sequence
             clip_selections = create_sequence(
-                segments,
+                segment_dicts,
                 self.matcher,
                 allow_reuse=allow_reuse,
                 prefer_non_reused=prefer_non_reused
@@ -280,6 +328,7 @@ class VideoSequencingPipeline:
                     {
                         'segment_id': c.segment_id,
                         'video_id': c.video_id,
+                        'video_file_path': c.video_file_path,
                         'trim_start': c.trim_start,
                         'trim_end': c.trim_end,
                         'similarity_score': c.similarity_score,
@@ -343,6 +392,10 @@ Examples:
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
     --whisper-model medium --llm-model meta-llama/Llama-3.2-3B-Instruct
   
+  # Use simple segmentation (no LLM required)
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
+    --simple-segmentation
+  
   # Prevent clip reuse
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
     --no-reuse
@@ -385,6 +438,11 @@ Examples:
         '--llm-model',
         default='meta-llama/Llama-3.2-3B-Instruct',
         help='Local LLM model for script segmentation (default: meta-llama/Llama-3.2-3B-Instruct)'
+    )
+    parser.add_argument(
+        '--simple-segmentation',
+        action='store_true',
+        help='Use simple rule-based segmentation instead of LLM (faster, no model download required)'
     )
     parser.add_argument(
         '--no-reuse',
@@ -437,7 +495,8 @@ Examples:
         whisper_model=args.whisper_model,
         videoprism_model=args.videoprism_model,
         allow_reuse=not args.no_reuse,
-        prefer_non_reused=args.prefer_non_reused
+        prefer_non_reused=args.prefer_non_reused,
+        use_simple_segmentation=args.simple_segmentation
     )
     
     if output_video:

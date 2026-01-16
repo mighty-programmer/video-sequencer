@@ -10,6 +10,7 @@ This module is responsible for:
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -27,6 +28,16 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+# List of fallback models in order of preference
+FALLBACK_MODELS = [
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "microsoft/Phi-3-mini-4k-instruct",
+    "google/gemma-2b-it",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "facebook/opt-1.3b",
+]
 
 
 @dataclass
@@ -50,12 +61,14 @@ class ScriptSegmenter:
     semantic boundaries and create meaningful segments for video matching.
     
     Default model: Llama-3.2-3B-Instruct (efficient and accurate for text tasks)
+    Fallback models: Phi-3-mini, Gemma-2B, TinyLlama, OPT-1.3B
     """
     
     def __init__(
         self,
         model_name: str = "meta-llama/Llama-3.2-3B-Instruct",
-        device: str = "cuda:0"
+        device: str = "cuda:0",
+        use_simple_segmentation: bool = False
     ):
         """
         Initialize the ScriptSegmenter with a local LLM.
@@ -63,6 +76,7 @@ class ScriptSegmenter:
         Args:
             model_name: Hugging Face model name (default: Llama-3.2-3B-Instruct)
             device: Device to run on ('cuda:0', 'cuda:1', etc., or 'cpu')
+            use_simple_segmentation: If True, skip LLM and use simple rule-based segmentation
         """
         if torch is None or AutoTokenizer is None:
             raise ImportError(
@@ -72,38 +86,63 @@ class ScriptSegmenter:
         
         self.model_name = model_name
         self.device = device
+        self.use_simple_segmentation = use_simple_segmentation
+        self.model = None
+        self.tokenizer = None
         
-        logger.info(f"Loading local LLM: {self.model_name}")
-        self._init_model()
-        logger.info(f"ScriptSegmenter initialized with {self.model_name}")
+        if not use_simple_segmentation:
+            logger.info(f"Loading local LLM: {self.model_name}")
+            self._init_model()
+            logger.info(f"ScriptSegmenter initialized with {self.model_name}")
+        else:
+            logger.info("ScriptSegmenter initialized with simple rule-based segmentation")
     
     def _init_model(self):
-        """Initialize the local Hugging Face model"""
-        logger.info(f"Loading tokenizer and model: {self.model_name}")
+        """Initialize the local Hugging Face model with fallback support"""
+        models_to_try = [self.model_name] + [m for m in FALLBACK_MODELS if m != self.model_name]
         
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name,
-            trust_remote_code=True
-        )
+        for model_name in models_to_try:
+            try:
+                logger.info(f"Attempting to load model: {model_name}")
+                
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True
+                )
+                
+                # Set pad token if not set
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                
+                # Determine device and dtype
+                if torch.cuda.is_available() and 'cuda' in self.device:
+                    dtype = torch.float16
+                    device_to_use = self.device
+                else:
+                    dtype = torch.float32
+                    device_to_use = 'cpu'
+                
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=dtype,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True
+                )
+                
+                # Move model to specified device
+                self.model = self.model.to(device_to_use)
+                self.model_name = model_name
+                
+                logger.info(f"Successfully loaded model: {model_name} on device: {self.model.device}")
+                return
+                
+            except Exception as e:
+                logger.warning(f"Failed to load model {model_name}: {e}")
+                continue
         
-        # Set pad token if not set
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Use specific GPU device instead of device_map="auto"
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            trust_remote_code=True
-        )
-        
-        # Move model to specified device
-        if torch.cuda.is_available() and 'cuda' in self.device:
-            self.model = self.model.to(self.device)
-        elif self.device == 'cpu':
-            self.model = self.model.to('cpu')
-        
-        logger.info(f"Model loaded successfully on device: {self.model.device}")
+        # If all models fail, fall back to simple segmentation
+        logger.warning("All LLM models failed to load. Using simple rule-based segmentation.")
+        self.use_simple_segmentation = True
     
     def segment_script(
         self,
@@ -129,8 +168,12 @@ class ScriptSegmenter:
         
         logger.info(f"Created {len(text_chunks)} initial chunks")
         
-        # Use LLM to identify semantic boundaries
-        semantic_segments = self._identify_semantic_boundaries(text_chunks)
+        if self.use_simple_segmentation or self.model is None:
+            # Use simple rule-based segmentation
+            semantic_segments = self._simple_segmentation(text_chunks)
+        else:
+            # Use LLM to identify semantic boundaries
+            semantic_segments = self._identify_semantic_boundaries(text_chunks)
         
         # Convert to ScriptSegment objects with timing
         segments = self._create_segments_with_timing(
@@ -183,6 +226,35 @@ class ScriptSegmenter:
         
         return chunks
     
+    def _simple_segmentation(self, text_chunks: List[Dict]) -> List[Dict]:
+        """
+        Simple rule-based segmentation based on sentence boundaries and pauses.
+        
+        Args:
+            text_chunks: List of text chunks
+        
+        Returns:
+            List of semantic segments
+        """
+        logger.info("Using simple rule-based segmentation")
+        
+        segments = []
+        for chunk in text_chunks:
+            # Extract simple keywords (nouns and verbs)
+            words = chunk['text'].lower().split()
+            keywords = [w for w in words if len(w) > 4][:5]
+            
+            segments.append({
+                'text': chunk['text'],
+                'start_time': chunk['start_time'],
+                'end_time': chunk['end_time'],
+                'description': f"Segment covering: {chunk['text'][:50]}...",
+                'keywords': keywords,
+                'action_type': 'general'
+            })
+        
+        return segments
+    
     def _identify_semantic_boundaries(
         self,
         text_chunks: List[Dict]
@@ -201,10 +273,13 @@ class ScriptSegmenter:
         
         prompt = self._create_segmentation_prompt(combined_text)
         
-        response = self._query_model(prompt)
-        
-        # Parse LLM response to extract segments
-        segments = self._parse_segmentation_response(response, text_chunks)
+        try:
+            response = self._query_model(prompt)
+            # Parse LLM response to extract segments
+            segments = self._parse_segmentation_response(response, text_chunks)
+        except Exception as e:
+            logger.error(f"LLM query failed: {e}")
+            segments = self._simple_segmentation(text_chunks)
         
         return segments
     
@@ -256,11 +331,14 @@ Respond only with valid JSON."""
         
         # Apply chat template if available
         if hasattr(self.tokenizer, 'apply_chat_template'):
-            formatted_prompt = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+            try:
+                formatted_prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+            except Exception:
+                formatted_prompt = f"System: You are a helpful assistant for video editing and script analysis.\n\nUser: {prompt}\n\nAssistant:"
         else:
             formatted_prompt = f"System: You are a helpful assistant for video editing and script analysis.\n\nUser: {prompt}\n\nAssistant:"
         
@@ -317,7 +395,7 @@ Respond only with valid JSON."""
             
             if json_start == -1 or json_end == 0:
                 logger.warning("No JSON found in LLM response, using fallback segmentation")
-                return self._fallback_segmentation(text_chunks)
+                return self._simple_segmentation(text_chunks)
             
             json_str = response[json_start:json_end]
             parsed = json.loads(json_str)
@@ -348,40 +426,14 @@ Respond only with valid JSON."""
             
             if not segments:
                 logger.warning("No valid segments parsed, using fallback")
-                return self._fallback_segmentation(text_chunks)
+                return self._simple_segmentation(text_chunks)
             
             return segments
         
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON response: {e}")
             logger.warning("Using fallback segmentation")
-            return self._fallback_segmentation(text_chunks)
-    
-    def _fallback_segmentation(self, text_chunks: List[Dict]) -> List[Dict]:
-        """
-        Fallback segmentation when LLM fails.
-        Simply treats each chunk as a segment.
-        
-        Args:
-            text_chunks: Original text chunks
-        
-        Returns:
-            List of segment dicts
-        """
-        logger.info("Using fallback segmentation (one segment per chunk)")
-        
-        segments = []
-        for chunk in text_chunks:
-            segments.append({
-                'text': chunk['text'],
-                'start_time': chunk['start_time'],
-                'end_time': chunk['end_time'],
-                'description': 'Auto-generated segment',
-                'keywords': [],
-                'action_type': 'general'
-            })
-        
-        return segments
+            return self._simple_segmentation(text_chunks)
     
     def _create_segments_with_timing(
         self,
@@ -448,43 +500,31 @@ Respond only with valid JSON."""
             segments_data = json.load(f)
         
         segments = [ScriptSegment(**seg) for seg in segments_data]
-        
         logger.info(f"Loaded {len(segments)} segments from {input_path}")
         return segments
 
 
-def main():
-    """Example usage"""
-    # Example transcription data
-    words_with_timing = [
-        {'word': 'Hello', 'start_time': 0.0, 'end_time': 0.5},
-        {'word': 'world', 'start_time': 0.5, 'end_time': 1.0},
-        {'word': 'this', 'start_time': 1.0, 'end_time': 1.3},
-        {'word': 'is', 'start_time': 1.3, 'end_time': 1.5},
-        {'word': 'a', 'start_time': 1.5, 'end_time': 1.6},
-        {'word': 'test', 'start_time': 1.6, 'end_time': 2.0},
-    ]
-    
-    full_text = "Hello world this is a test"
-    
-    # Initialize segmenter with local LLM
+if __name__ == '__main__':
+    # Example usage
     segmenter = ScriptSegmenter()
     
-    # Segment the script
-    segments = segmenter.segment_script(full_text, words_with_timing, max_segment_words=3)
+    # Test with sample data
+    sample_text = "First, we plug in the USB cable. Then we open the software."
+    sample_words = [
+        {'word': 'First,', 'start_time': 0.0, 'end_time': 0.5},
+        {'word': 'we', 'start_time': 0.5, 'end_time': 0.6},
+        {'word': 'plug', 'start_time': 0.6, 'end_time': 0.8},
+        {'word': 'in', 'start_time': 0.8, 'end_time': 0.9},
+        {'word': 'the', 'start_time': 0.9, 'end_time': 1.0},
+        {'word': 'USB', 'start_time': 1.0, 'end_time': 1.3},
+        {'word': 'cable.', 'start_time': 1.3, 'end_time': 1.6},
+        {'word': 'Then', 'start_time': 1.8, 'end_time': 2.0},
+        {'word': 'we', 'start_time': 2.0, 'end_time': 2.1},
+        {'word': 'open', 'start_time': 2.1, 'end_time': 2.3},
+        {'word': 'the', 'start_time': 2.3, 'end_time': 2.4},
+        {'word': 'software.', 'start_time': 2.4, 'end_time': 2.8},
+    ]
     
-    # Print results
+    segments = segmenter.segment_script(sample_text, sample_words)
     for seg in segments:
-        print(f"\nSegment {seg.segment_id}:")
-        print(f"  Text: {seg.text}")
-        print(f"  Time: {seg.start_time:.2f}s - {seg.end_time:.2f}s ({seg.duration:.2f}s)")
-        print(f"  Description: {seg.description}")
-        print(f"  Keywords: {seg.keywords}")
-        print(f"  Action Type: {seg.action_type}")
-    
-    # Save segments
-    segmenter.save_segments(segments, Path("segments.json"))
-
-
-if __name__ == "__main__":
-    main()
+        print(f"Segment {seg.segment_id}: {seg.text[:50]}... ({seg.duration:.2f}s)")
