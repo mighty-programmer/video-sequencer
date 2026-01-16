@@ -144,11 +144,13 @@ class VoiceTranscriber:
         duration = self.get_audio_duration(audio_path)
         
         # Transcribe with Whisper
+        # Note: word_timestamps is the correct parameter for word-level timing
+        # It requires the model to output word-level timestamps in segments
         result = self.model.transcribe(
             audio_path,
             language=self.language,
             verbose=False,
-            word_level_timestamps=True
+            word_timestamps=True  # Correct parameter name for word-level timestamps
         )
         
         full_text = result['text']
@@ -181,29 +183,41 @@ class VoiceTranscriber:
         words = []
         
         for segment in whisper_result.get('segments', []):
-            segment_start = segment['start']
-            segment_end = segment['end']
-            segment_text = segment['text'].strip()
-            
-            # Split segment into words
-            word_list = segment_text.split()
-            
-            if not word_list:
-                continue
-            
-            # Estimate word timings by dividing segment duration equally
-            segment_duration = segment_end - segment_start
-            word_duration = segment_duration / len(word_list)
-            
-            for i, word in enumerate(word_list):
-                start_time = segment_start + (i * word_duration)
-                end_time = segment_start + ((i + 1) * word_duration)
+            # Check if word-level timestamps are available in the segment
+            if 'words' in segment:
+                # Use actual word-level timestamps from Whisper
+                for word_info in segment['words']:
+                    words.append(WordSegment(
+                        word=word_info.get('word', '').strip(),
+                        start_time=word_info.get('start', 0.0),
+                        end_time=word_info.get('end', 0.0),
+                        confidence=word_info.get('probability', None)
+                    ))
+            else:
+                # Fallback: estimate word timings by dividing segment duration equally
+                segment_start = segment['start']
+                segment_end = segment['end']
+                segment_text = segment['text'].strip()
                 
-                words.append(WordSegment(
-                    word=word,
-                    start_time=start_time,
-                    end_time=end_time
-                ))
+                # Split segment into words
+                word_list = segment_text.split()
+                
+                if not word_list:
+                    continue
+                
+                # Estimate word timings by dividing segment duration equally
+                segment_duration = segment_end - segment_start
+                word_duration = segment_duration / len(word_list)
+                
+                for i, word in enumerate(word_list):
+                    start_time = segment_start + (i * word_duration)
+                    end_time = segment_start + ((i + 1) * word_duration)
+                    
+                    words.append(WordSegment(
+                        word=word,
+                        start_time=start_time,
+                        end_time=end_time
+                    ))
         
         return words
     
