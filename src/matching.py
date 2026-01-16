@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-@dataclass\nclass ClipSelection:
+@dataclass
+class ClipSelection:
     \"\"\"Represents a selected video clip for a script segment\"\"\"
     segment_id: int
     video_id: str
