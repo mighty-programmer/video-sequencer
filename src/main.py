@@ -138,7 +138,8 @@ class VideoSequencingPipeline:
         videoprism_model: str = 'videoprism_lvt_public_v1_base',
         use_simple_segmentation: bool = False,
         manual_segments_file: str = None,
-        match_only: bool = False
+        match_only: bool = False,
+        allow_reuse: bool = True
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -150,6 +151,7 @@ class VideoSequencingPipeline:
             use_simple_segmentation: Use simple rule-based segmentation instead of LLM
             manual_segments_file: Path to JSON file with manual segments (skips transcription & segmentation)
             match_only: If True, bypass transcription and duration constraints (test mode)
+            allow_reuse: Whether to allow reusing videos
         
         Returns:
             Path to output video or None if failed
@@ -159,6 +161,8 @@ class VideoSequencingPipeline:
             logger.info("Starting Video Sequencing Pipeline")
             if match_only:
                 logger.info("MODE: Match-Only Test Mode (Bypassing transcription & duration constraints)")
+                if not allow_reuse:
+                    logger.info("REUSE: Disabled (Each segment will have a unique clip)")
             logger.info("=" * 80)
             
             # Check FFmpeg availability
@@ -201,7 +205,7 @@ class VideoSequencingPipeline:
             
             # Step 4: Match segments to videos
             logger.info("\n[STEP 4] Matching script segments to video clips...")
-            clip_selections = self._match_and_sequence(segments, match_only=match_only)
+            clip_selections = self._match_and_sequence(segments, match_only=match_only, allow_reuse=allow_reuse)
             if clip_selections is None:
                 return None
             
@@ -392,7 +396,8 @@ class VideoSequencingPipeline:
     def _match_and_sequence(
         self,
         segments,
-        match_only: bool = False
+        match_only: bool = False,
+        allow_reuse: bool = True
     ):
         """Match script segments to video clips"""
         try:
@@ -416,7 +421,8 @@ class VideoSequencingPipeline:
             clip_selections = create_sequence(
                 segment_dicts,
                 self.matcher,
-                match_only=match_only
+                match_only=match_only,
+                allow_reuse=allow_reuse
             )
             
             if not clip_selections:
@@ -582,6 +588,13 @@ Examples:
         help='Test mode: Bypass transcription and duration constraints'
     )
     parser.add_argument(
+        '--no-reuse',
+        action='store_false',
+        dest='allow_reuse',
+        default=True,
+        help='Prevent reusing the same video clip for multiple segments'
+    )
+    parser.add_argument(
         '--whisper-model',
         default='base',
         choices=['tiny', 'base', 'small', 'medium', 'large'],
@@ -652,7 +665,8 @@ Examples:
         videoprism_model=args.videoprism_model,
         use_simple_segmentation=args.simple_segmentation,
         manual_segments_file=args.segments,
-        match_only=args.match_only
+        match_only=args.match_only,
+        allow_reuse=args.allow_reuse
     )
     
     if output_video:

@@ -349,7 +349,8 @@ class VideoTextMatcher:
 def create_sequence(
     script_segments: List[Dict],
     video_matcher: VideoTextMatcher,
-    match_only: bool = False
+    match_only: bool = False,
+    allow_reuse: bool = True
 ) -> List[ClipSelection]:
     """
     Create a sequence of video clips matched to script segments.
@@ -357,13 +358,14 @@ def create_sequence(
     Args:
         script_segments: List of segment dictionaries with 'text' and 'duration'
         video_matcher: VideoTextMatcher instance
-        match_only: If True, use pure semantic similarity (no diversity, no duration constraints)
+        match_only: If True, bypass duration constraints and diversity penalties
+        allow_reuse: Whether to allow reusing videos (can be False even in match_only)
         
     Returns:
         List of ClipSelection objects representing the video sequence
     """
     sequence = []
-    used_videos = set()  # Only used in production mode
+    used_videos = set()
     all_metadata = video_matcher.get_all_video_metadata()
     
     if not all_metadata:
@@ -373,8 +375,8 @@ def create_sequence(
     for i, segment in enumerate(script_segments):
         logger.info(f"Processing segment {i+1}/{len(script_segments)}")
         
-        # In match-only mode, don't track used videos (allow same clip to be selected)
-        videos_to_exclude = set() if match_only else used_videos
+        # Determine which videos to exclude based on allow_reuse
+        videos_to_exclude = set() if allow_reuse else used_videos
         
         # 1. Try to find a good match using semantic similarity
         candidates = video_matcher.match_segment_to_videos(
