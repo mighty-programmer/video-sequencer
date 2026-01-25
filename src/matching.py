@@ -372,6 +372,10 @@ def create_sequence(
         logger.error("No video metadata available!")
         return []
     
+    # Check if we have enough unique clips for no-reuse mode
+    if not allow_reuse and len(all_metadata) < len(script_segments):
+        logger.warning(f"Not enough unique clips ({len(all_metadata)}) for all segments ({len(script_segments)}). Some reuse will be unavoidable.")
+
     for i, segment in enumerate(script_segments):
         logger.info(f"Processing segment {i+1}/{len(script_segments)}")
         
@@ -386,19 +390,38 @@ def create_sequence(
             match_only=match_only
         )
         
-        best_clip_data = video_matcher.select_best_clip(
-            candidates, 
-            segment['duration'],
-            match_only=match_only
-        )
+        # If no candidates found and we are forbidding reuse, try to find ANY unused video
+        if not candidates and not allow_reuse:
+            unused_metadata = [m for m in all_metadata if m.video_id not in used_videos]
+            if unused_metadata:
+                logger.info(f"  -> No semantic candidates for segment {i+1}, picking first available unused clip for strict no-reuse")
+                fallback_meta = unused_metadata[0]
+                best_clip_data = {
+                    'video_id': fallback_meta.video_id,
+                    'file_path': fallback_meta.file_path,
+                    'duration': fallback_meta.duration,
+                    'similarity': 0.0,
+                    'similarity_score': 0.0,
+                    'motion_score': 0.0,
+                    'context_score': 0.0,
+                    'combined_score': 0.0,
+                    'is_reused': False
+                }
+            else:
+                best_clip_data = None
+        else:
+            best_clip_data = video_matcher.select_best_clip(
+                candidates, 
+                segment['duration'],
+                match_only=match_only
+            )
         
-        # 2. If no candidates found, use diversity-aware fallback
+        # 2. If still no clip found (only happens if all clips are used and no-reuse is on, or index is empty)
         if not best_clip_data:
-            logger.warning(f"  -> No candidates for segment {i+1}, using best-effort fallback")
+            logger.warning(f"  -> Absolutely no clips available for segment {i+1}")
             
-            # Pick a video that hasn't been used recently
-            unused = [m for m in all_metadata if m.video_id not in used_videos]
-            fallback_meta = unused[0] if unused else all_metadata[i % len(all_metadata)]
+            # Ultimate fallback (will reuse if necessary)
+            fallback_meta = all_metadata[i % len(all_metadata)]
             
             if match_only:
                 trim_start, trim_end = 0.0, fallback_meta.duration
