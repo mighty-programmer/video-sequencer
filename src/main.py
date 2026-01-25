@@ -448,18 +448,52 @@ class VideoSequencingPipeline:
             logger.info(f"  Reused clips: {reused_count}")
             
             # Display detailed summary for the user
-            print("\n" + "="*120)
-            print(f"{'SEGMENT ID':<12} | {'START':<8} | {'END':<8} | {'SCORE':<8} | {'SOURCE VIDEO FILE (RELATIVE PATH)'}")
-            print("-" * 120)
-            for c in clip_selections:
-                # Get path relative to the video_dir for clarity
-                try:
-                    rel_path = str(Path(c.video_file_path).relative_to(self.video_dir))
-                except ValueError:
-                    rel_path = Path(c.video_file_path).name
+            if match_only:
+                # Match-only mode: Show pure semantic similarity results
+                print("\n" + "="*130)
+                print("MATCH-ONLY MODE: Pure VideoPrism Semantic Similarity Results")
+                print("="*130)
+                print(f"{'SEG':<5} | {'COSINE SIM':<12} | {'REUSED?':<8} | {'VIDEO FILE':<50} | {'SEGMENT TEXT'}")
+                print("-" * 130)
+                for i, c in enumerate(clip_selections):
+                    try:
+                        rel_path = str(Path(c.video_file_path).relative_to(self.video_dir))
+                    except ValueError:
+                        rel_path = Path(c.video_file_path).name
+                    
+                    # Get segment text (truncated)
+                    seg_text = segment_dicts[i]['text'][:40] + "..." if len(segment_dicts[i]['text']) > 40 else segment_dicts[i]['text']
+                    reused = "YES" if c.is_reused else "no"
+                    
+                    print(f"{c.segment_id:<5} | {c.similarity_score:<12.4f} | {reused:<8} | {rel_path:<50} | {seg_text}")
+                print("="*130)
                 
-                print(f"{c.segment_id:<12} | {c.trim_start:<8.2f} | {c.trim_end:<8.2f} | {c.similarity_score:<8.3f} | {rel_path}")
-            print("="*120 + "\n")
+                # Summary statistics
+                unique_clips = len(set(c.video_id for c in clip_selections))
+                total_segments = len(clip_selections)
+                reused_count = sum(1 for c in clip_selections if c.is_reused)
+                avg_similarity = sum(c.similarity_score for c in clip_selections) / total_segments if total_segments > 0 else 0
+                
+                print(f"\nSUMMARY:")
+                print(f"  Total segments: {total_segments}")
+                print(f"  Unique clips selected: {unique_clips}")
+                print(f"  Clips reused: {reused_count}")
+                print(f"  Average cosine similarity: {avg_similarity:.4f}")
+                print(f"  Similarity range: [{min(c.similarity_score for c in clip_selections):.4f}, {max(c.similarity_score for c in clip_selections):.4f}]")
+                print("\n")
+            else:
+                # Production mode: Show combined scores
+                print("\n" + "="*120)
+                print(f"{'SEGMENT ID':<12} | {'START':<8} | {'END':<8} | {'SCORE':<8} | {'SOURCE VIDEO FILE (RELATIVE PATH)'}")
+                print("-" * 120)
+                for c in clip_selections:
+                    try:
+                        rel_path = str(Path(c.video_file_path).relative_to(self.video_dir))
+                    except ValueError:
+                        rel_path = Path(c.video_file_path).name
+                    
+                    print(f"{c.segment_id:<12} | {c.trim_start:<8.2f} | {c.trim_end:<8.2f} | {c.combined_score:<8.3f} | {rel_path}")
+                print("="*120 + "\n")
             
             return clip_selections
         

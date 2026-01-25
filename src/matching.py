@@ -154,15 +154,15 @@ class VideoTextMatcher:
             k: Number of top candidates to return
             allow_reuse: Whether to allow reusing videos
             used_videos: Set of already used video IDs
-            match_only: If True, ignore duration compatibility and diversity penalties
+            match_only: If True, use ONLY raw semantic similarity (pure VideoPrism test)
             
         Returns:
-            List of candidate dictionaries sorted by combined score
+            List of candidate dictionaries sorted by score
         """
         if used_videos is None:
             used_videos = set()
         
-        logger.info(f"Matching segment: '{segment_text[:50]}...' (duration: {segment_duration:.2f}s)")
+        logger.info(f"Matching segment: '{segment_text[:60]}...' (duration: {segment_duration:.2f}s)")
         
         # Get text embedding
         text_embedding = self.get_text_embedding(segment_text)
@@ -173,8 +173,12 @@ class VideoTextMatcher:
             logger.error("No videos indexed! Cannot match segments.")
             return []
         
-        # Search for more candidates to allow for diversity filtering
-        search_k = min(num_videos, k * 5)
+        # In match-only mode, get ALL videos to show full ranking
+        if match_only:
+            search_k = num_videos
+        else:
+            search_k = min(num_videos, k * 5)
+        
         results = self.video_indexer.search_by_embedding(text_embedding, k=search_k)
         
         if not results:
@@ -183,17 +187,18 @@ class VideoTextMatcher:
         
         candidates = []
         for video_id, similarity, metadata in results:
-            # similarity is now cosine similarity (higher is better, range [-1, 1])
+            # similarity is cosine similarity (higher is better, range [-1, 1])
             # Normalize to [0, 1] for scoring
             similarity_score = (similarity + 1.0) / 2.0
             
             if match_only:
-                # In match-only mode, we only care about semantic similarity and context
-                motion_score = 1.0
-                diversity_multiplier = 1.0
-                context_score = self._calculate_context_score(segment_text, metadata)
-                combined_score = (0.8 * similarity_score) + (0.2 * context_score)
+                # PURE SEMANTIC MATCHING MODE
+                # Only use raw cosine similarity - no other factors
+                motion_score = 0.0  # Not used
+                context_score = 0.0  # Not used
+                combined_score = similarity  # Use raw cosine similarity for ranking
             else:
+                # PRODUCTION MODE - Use all factors
                 # Boost score if video hasn't been used yet (Diversity Boost)
                 diversity_multiplier = 1.2 if video_id not in used_videos else 0.8
                 
@@ -218,7 +223,7 @@ class VideoTextMatcher:
                 'video_id': video_id,
                 'file_path': metadata.file_path,
                 'duration': metadata.duration,
-                'similarity': similarity,  # Raw cosine similarity
+                'similarity': similarity,  # Raw cosine similarity [-1, 1]
                 'similarity_score': similarity_score,  # Normalized [0, 1]
                 'motion_score': motion_score,
                 'context_score': context_score,
@@ -229,12 +234,12 @@ class VideoTextMatcher:
         # Sort by combined score (higher is better)
         candidates.sort(key=lambda x: x['combined_score'], reverse=True)
         
-        # Log top candidates for debugging
-        if candidates:
-            logger.debug(f"Top 3 candidates:")
-            for i, c in enumerate(candidates[:3]):
-                logger.debug(f"  {i+1}. {c['video_id']}: sim={c['similarity']:.3f}, "
-                           f"combined={c['combined_score']:.3f}")
+        # In match-only mode, log detailed results for debugging
+        if match_only and candidates:
+            logger.info(f"  Top 5 matches by raw cosine similarity:")
+            for i, c in enumerate(candidates[:5]):
+                video_name = Path(c['file_path']).name
+                logger.info(f"    {i+1}. {video_name}: cosine_sim={c['similarity']:.4f}")
         
         return candidates[:k]
     
@@ -320,8 +325,9 @@ class VideoTextMatcher:
         best['trim_end'] = trim_end
         best['trim_duration'] = trim_end - trim_start
         
-        # Update history for diversity tracking
-        self.used_videos_history.append(best['video_id'])
+        # Only track history in production mode
+        if not match_only:
+            self.used_videos_history.append(best['video_id'])
         
         return best
     
@@ -351,13 +357,13 @@ def create_sequence(
     Args:
         script_segments: List of segment dictionaries with 'text' and 'duration'
         video_matcher: VideoTextMatcher instance
-        match_only: If True, bypass duration constraints and diversity penalties
+        match_only: If True, use pure semantic similarity (no diversity, no duration constraints)
         
     Returns:
         List of ClipSelection objects representing the video sequence
     """
     sequence = []
-    used_videos = set()
+    used_videos = set()  # Only used in production mode
     all_metadata = video_matcher.get_all_video_metadata()
     
     if not all_metadata:
@@ -367,11 +373,14 @@ def create_sequence(
     for i, segment in enumerate(script_segments):
         logger.info(f"Processing segment {i+1}/{len(script_segments)}")
         
+        # In match-only mode, don't track used videos (allow same clip to be selected)
+        videos_to_exclude = set() if match_only else used_videos
+        
         # 1. Try to find a good match using semantic similarity
         candidates = video_matcher.match_segment_to_videos(
             segment['text'], 
             segment['duration'], 
-            used_videos=used_videos,
+            used_videos=videos_to_exclude,
             match_only=match_only
         )
         
@@ -405,12 +414,15 @@ def create_sequence(
                 trim_start=trim_start, 
                 trim_end=trim_end,
                 trim_duration=trim_end - trim_start,
-                similarity_score=0.1, 
-                motion_score=0.5, 
-                context_score=0.5, 
-                combined_score=0.3
+                similarity_score=0.0,  # No match found
+                motion_score=0.0, 
+                context_score=0.0, 
+                combined_score=0.0
             )
         else:
+            # Check if this clip was already used (for reporting purposes)
+            is_reused = best_clip_data['video_id'] in used_videos
+            
             selection = ClipSelection(
                 segment_id=i,
                 video_id=best_clip_data['video_id'],
@@ -420,15 +432,15 @@ def create_sequence(
                 trim_start=best_clip_data['trim_start'],
                 trim_end=best_clip_data['trim_end'],
                 trim_duration=best_clip_data['trim_duration'],
-                similarity_score=best_clip_data['similarity_score'],
+                similarity_score=best_clip_data['similarity'],  # Raw cosine similarity
                 motion_score=best_clip_data['motion_score'],
                 context_score=best_clip_data['context_score'],
                 combined_score=best_clip_data['combined_score'],
-                is_reused=best_clip_data['is_reused']
+                is_reused=is_reused
             )
         
         sequence.append(selection)
-        used_videos.add(selection.video_id)
+        used_videos.add(selection.video_id)  # Track for reuse reporting
     
     # Calculate start/end times in the final sequence
     current_time = 0.0
