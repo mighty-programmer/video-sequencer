@@ -7,7 +7,7 @@ Main CLI application entry point.
 This application automatically generates edited videos by:
 1. Indexing B-roll video footage using VideoPrism
 2. Transcribing voice-over audio using Whisper
-3. Segmenting the script using an LLM
+3. Segmenting the script using an LLM (or manual segments)
 4. Matching script segments to video clips
 5. Assembling and exporting the final video
 """
@@ -18,12 +18,12 @@ import json
 import sys
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 # Import modules
 from indexing import VideoIndexer
 from transcription import VoiceTranscriber, TranscriptionAnalyzer
-from segmentation import ScriptSegmenter
+from segmentation import ScriptSegmenter, ScriptSegment
 from matching import VideoTextMatcher, create_sequence
 from assembly import VideoAssembler, VideoSequenceBuilder
 
@@ -41,6 +41,50 @@ def check_ffmpeg():
     if shutil.which('ffmpeg') is None:
         return False
     return True
+
+
+def load_manual_segments(segments_file: str) -> List[ScriptSegment]:
+    """
+    Load segments from a manually created JSON file.
+    
+    Expected JSON format:
+    {
+        "segments": [
+            {
+                "text": "The actual script text for this segment",
+                "start_time": 0.0,
+                "end_time": 5.5,
+                "description": "Optional description for matching",
+                "keywords": ["optional", "keywords", "for", "matching"]
+            },
+            ...
+        ]
+    }
+    
+    Args:
+        segments_file: Path to the JSON file containing segments
+        
+    Returns:
+        List of ScriptSegment objects
+    """
+    with open(segments_file, 'r') as f:
+        data = json.load(f)
+    
+    segments = []
+    for i, seg_data in enumerate(data.get('segments', [])):
+        segment = ScriptSegment(
+            segment_id=i,
+            text=seg_data['text'],
+            start_time=seg_data['start_time'],
+            end_time=seg_data['end_time'],
+            duration=seg_data['end_time'] - seg_data['start_time'],
+            description=seg_data.get('description'),
+            keywords=seg_data.get('keywords'),
+            action_type=seg_data.get('action_type')
+        )
+        segments.append(segment)
+    
+    return segments
 
 
 class VideoSequencingPipeline:
@@ -88,7 +132,8 @@ class VideoSequencingPipeline:
         llm_model: str = 'meta-llama/Llama-3.2-3B-Instruct',
         whisper_model: str = 'base',
         videoprism_model: str = 'videoprism_lvt_public_v1_base',
-        use_simple_segmentation: bool = False
+        use_simple_segmentation: bool = False,
+        manual_segments_file: str = None
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -98,6 +143,7 @@ class VideoSequencingPipeline:
             whisper_model: Whisper model size ('tiny', 'base', 'small', 'medium', 'large')
             videoprism_model: VideoPrism model to use
             use_simple_segmentation: Use simple rule-based segmentation instead of LLM
+            manual_segments_file: Path to JSON file with manual segments (skips transcription & segmentation)
         
         Returns:
             Path to output video or None if failed
@@ -121,17 +167,25 @@ class VideoSequencingPipeline:
             if not self._index_videos(videoprism_model):
                 return None
             
-            # Step 2: Transcribe audio
-            logger.info("\n[STEP 2] Transcribing voice-over audio...")
-            transcription = self._transcribe_audio(whisper_model)
-            if transcription is None:
-                return None
-            
-            # Step 3: Segment script
-            logger.info("\n[STEP 3] Segmenting script into semantic chunks...")
-            segments = self._segment_script(transcription, llm_model, use_simple_segmentation)
-            if segments is None:
-                return None
+            # Check if using manual segments
+            if manual_segments_file:
+                logger.info("\n[STEP 2-3] Loading manual segments (skipping transcription & LLM segmentation)...")
+                segments = self._load_manual_segments(manual_segments_file)
+                if segments is None:
+                    return None
+                transcription = None  # No transcription needed for manual segments
+            else:
+                # Step 2: Transcribe audio
+                logger.info("\n[STEP 2] Transcribing voice-over audio...")
+                transcription = self._transcribe_audio(whisper_model)
+                if transcription is None:
+                    return None
+                
+                # Step 3: Segment script
+                logger.info("\n[STEP 3] Segmenting script into semantic chunks...")
+                segments = self._segment_script(transcription, llm_model, use_simple_segmentation)
+                if segments is None:
+                    return None
             
             # Step 4: Match segments to videos
             logger.info("\n[STEP 4] Matching script segments to video clips...")
@@ -152,6 +206,31 @@ class VideoSequencingPipeline:
         
         except Exception as e:
             logger.error(f"Pipeline failed: {e}", exc_info=True)
+            return None
+    
+    def _load_manual_segments(self, segments_file: str) -> Optional[List[ScriptSegment]]:
+        """Load manually defined segments from a JSON file"""
+        try:
+            segments = load_manual_segments(segments_file)
+            
+            logger.info(f"Loaded {len(segments)} manual segments:")
+            for seg in segments:
+                text_preview = seg.text[:50] + "..." if len(seg.text) > 50 else seg.text
+                logger.info(f"  [{seg.segment_id}] {text_preview} ({seg.duration:.2f}s)")
+            
+            return segments
+        
+        except FileNotFoundError:
+            logger.error(f"Manual segments file not found: {segments_file}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in segments file: {e}")
+            return None
+        except KeyError as e:
+            logger.error(f"Missing required field in segments file: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error loading manual segments: {e}")
             return None
     
     def _index_videos(self, model_name: str) -> bool:
@@ -384,6 +463,22 @@ Examples:
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
     --simple-segmentation
   
+  # Use manual segments (skip transcription & segmentation entirely)
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
+    --segments ./my_segments.json
+
+Manual Segments JSON Format:
+  {
+    "segments": [
+      {
+        "text": "Script text for matching",
+        "start_time": 0.0,
+        "end_time": 5.5,
+        "description": "Optional description",
+        "keywords": ["optional", "keywords"]
+      }
+    ]
+  }
         """
     )
     
@@ -406,6 +501,11 @@ Examples:
         '--cache-dir',
         default='./cache',
         help='Directory for caching intermediate results (default: ./cache)'
+    )
+    parser.add_argument(
+        '--segments',
+        default=None,
+        help='Path to JSON file with manual segments (skips transcription & LLM segmentation)'
     )
     parser.add_argument(
         '--whisper-model',
@@ -455,6 +555,10 @@ Examples:
         logger.error(f"Audio file not found: {args.audio}")
         sys.exit(1)
     
+    if args.segments and not Path(args.segments).exists():
+        logger.error(f"Segments file not found: {args.segments}")
+        sys.exit(1)
+    
     # Run pipeline
     pipeline = VideoSequencingPipeline(
         video_dir=args.video_dir,
@@ -468,7 +572,8 @@ Examples:
         llm_model=args.llm_model,
         whisper_model=args.whisper_model,
         videoprism_model=args.videoprism_model,
-        use_simple_segmentation=args.simple_segmentation
+        use_simple_segmentation=args.simple_segmentation,
+        manual_segments_file=args.segments
     )
     
     if output_video:
