@@ -264,22 +264,34 @@ class VideoSequencingPipeline:
             if self.indexer.load_index():
                 logger.info(f"Loaded existing video index with {len(self.indexer.metadata_list)} videos")
                 
-                # Check if there are new videos to index
+                # Check if the indexed videos actually exist and match the current video_dir
                 video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
                 video_files = [
                     f for f in self.video_dir.rglob('*')
                     if f.suffix.lower() in video_extensions
                 ]
                 
-                existing_ids = set(self.indexer.video_id_to_idx.keys())
-                new_videos = [f for f in video_files if f.stem not in existing_ids]
-                
-                if new_videos:
-                    logger.info(f"Found {len(new_videos)} new videos to index")
-                    num_indexed = self.indexer.index_videos(str(self.video_dir))
-                    logger.info(f"Indexed {num_indexed} new videos")
-                
-                return True
+                # Verify if the index is for a different directory
+                if self.indexer.metadata_list:
+                    first_video_path = Path(self.indexer.metadata_list[0].file_path)
+                    if not str(first_video_path.absolute()).startswith(str(self.video_dir.absolute())):
+                        logger.warning(f"Existing index appears to be for a different directory: {first_video_path.parent}")
+                        logger.warning("Forcing re-indexing for the new directory...")
+                        # Clear the indexer's state
+                        self.indexer.metadata_list = []
+                        self.indexer.video_id_to_idx = {}
+                        self.indexer.index = None
+                    else:
+                        # Check if there are new videos to index
+                        existing_ids = set(self.indexer.video_id_to_idx.keys())
+                        new_videos = [f for f in video_files if f.stem not in existing_ids]
+                        
+                        if new_videos:
+                            logger.info(f"Found {len(new_videos)} new videos to index")
+                            num_indexed = self.indexer.index_videos(str(self.video_dir))
+                            logger.info(f"Indexed {num_indexed} new videos")
+                        
+                        return True
             
             # Create new index
             num_indexed = self.indexer.index_videos(str(self.video_dir))
@@ -436,13 +448,18 @@ class VideoSequencingPipeline:
             logger.info(f"  Reused clips: {reused_count}")
             
             # Display detailed summary for the user
-            print("\n" + "="*100)
-            print(f"{'SEGMENT ID':<12} | {'START':<8} | {'END':<8} | {'SCORE':<8} | {'SOURCE VIDEO FILE'}")
-            print("-" * 100)
+            print("\n" + "="*120)
+            print(f"{'SEGMENT ID':<12} | {'START':<8} | {'END':<8} | {'SCORE':<8} | {'SOURCE VIDEO FILE (RELATIVE PATH)'}")
+            print("-" * 120)
             for c in clip_selections:
-                filename = Path(c.video_file_path).name
-                print(f"{c.segment_id:<12} | {c.trim_start:<8.2f} | {c.trim_end:<8.2f} | {c.similarity_score:<8.3f} | {filename}")
-            print("="*100 + "\n")
+                # Get path relative to the video_dir for clarity
+                try:
+                    rel_path = str(Path(c.video_file_path).relative_to(self.video_dir))
+                except ValueError:
+                    rel_path = Path(c.video_file_path).name
+                
+                print(f"{c.segment_id:<12} | {c.trim_start:<8.2f} | {c.trim_end:<8.2f} | {c.similarity_score:<8.3f} | {rel_path}")
+            print("="*120 + "\n")
             
             return clip_selections
         
