@@ -182,9 +182,18 @@ class VideoAssembler:
         # Create a concat demuxer file
         concat_file = Path(output_path).parent / 'concat_list.txt'
         
+        # Write the concat list file with proper newlines
         with open(concat_file, 'w') as f:
             for video_path in video_paths:
-                f.write(f"file '{Path(video_path).absolute()}'\\n")
+                # Use actual newline character, not escaped string
+                abs_path = str(Path(video_path).absolute())
+                f.write(f"file '{abs_path}'\n")
+        
+        # Log the concat file contents for debugging
+        logger.debug(f"Concat file contents:")
+        with open(concat_file, 'r') as f:
+            for line in f:
+                logger.debug(f"  {line.strip()}")
         
         cmd = [
             'ffmpeg',
@@ -197,7 +206,7 @@ class VideoAssembler:
         ]
         
         try:
-            subprocess.run(cmd, capture_output=True, check=True, timeout=600)
+            result = subprocess.run(cmd, capture_output=True, check=True, timeout=600)
             logger.info(f"Successfully concatenated to {output_path}")
             concat_file.unlink()  # Remove concat file
             return True
@@ -206,6 +215,11 @@ class VideoAssembler:
             return False
         except subprocess.CalledProcessError as e:
             logger.error(f"FFmpeg error: {e.stderr.decode()}")
+            # Log the concat file for debugging
+            if concat_file.exists():
+                logger.error(f"Concat file contents:")
+                with open(concat_file, 'r') as f:
+                    logger.error(f.read())
             return False
     
     def _concatenate_videos_moviepy(
