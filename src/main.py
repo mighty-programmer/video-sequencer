@@ -88,8 +88,6 @@ class VideoSequencingPipeline:
         llm_model: str = 'meta-llama/Llama-3.2-3B-Instruct',
         whisper_model: str = 'base',
         videoprism_model: str = 'videoprism_public_v1_base',
-        allow_reuse: bool = True,
-        prefer_non_reused: bool = True,
         use_simple_segmentation: bool = False
     ) -> Optional[Path]:
         """
@@ -99,8 +97,6 @@ class VideoSequencingPipeline:
             llm_model: Local LLM model name (default: Llama-3.2-3B-Instruct)
             whisper_model: Whisper model size ('tiny', 'base', 'small', 'medium', 'large')
             videoprism_model: VideoPrism model to use
-            allow_reuse: Whether to allow reusing video clips
-            prefer_non_reused: Prefer non-reused clips if possible
             use_simple_segmentation: Use simple rule-based segmentation instead of LLM
         
         Returns:
@@ -139,11 +135,7 @@ class VideoSequencingPipeline:
             
             # Step 4: Match segments to videos
             logger.info("\n[STEP 4] Matching script segments to video clips...")
-            clip_selections = self._match_and_sequence(
-                segments,
-                allow_reuse=allow_reuse,
-                prefer_non_reused=prefer_non_reused
-            )
+            clip_selections = self._match_and_sequence(segments)
             if clip_selections is None:
                 return None
             
@@ -288,9 +280,7 @@ class VideoSequencingPipeline:
     
     def _match_and_sequence(
         self,
-        segments,
-        allow_reuse: bool = True,
-        prefer_non_reused: bool = True
+        segments
     ):
         """Match script segments to video clips"""
         try:
@@ -313,9 +303,7 @@ class VideoSequencingPipeline:
             # Create sequence
             clip_selections = create_sequence(
                 segment_dicts,
-                self.matcher,
-                allow_reuse=allow_reuse,
-                prefer_non_reused=prefer_non_reused
+                self.matcher
             )
             
             if not clip_selections:
@@ -396,9 +384,6 @@ Examples:
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
     --simple-segmentation
   
-  # Prevent clip reuse
-  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
-    --no-reuse
         """
     )
     
@@ -445,17 +430,6 @@ Examples:
         help='Use simple rule-based segmentation instead of LLM (faster, no model download required)'
     )
     parser.add_argument(
-        '--no-reuse',
-        action='store_true',
-        help='Prevent reusing video clips'
-    )
-    parser.add_argument(
-        '--prefer-non-reused',
-        action='store_true',
-        default=True,
-        help='Prefer non-reused clips if available (default: True)'
-    )
-    parser.add_argument(
         '--gpu-device',
         default='cuda:0',
         help='GPU device to use (e.g., cuda:0, cuda:1, cuda:2, cuda:3, or cpu) (default: cuda:0)'
@@ -494,8 +468,6 @@ Examples:
         llm_model=args.llm_model,
         whisper_model=args.whisper_model,
         videoprism_model=args.videoprism_model,
-        allow_reuse=not args.no_reuse,
-        prefer_non_reused=args.prefer_non_reused,
         use_simple_segmentation=args.simple_segmentation
     )
     
