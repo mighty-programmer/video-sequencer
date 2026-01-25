@@ -413,6 +413,15 @@ class VideoSequencingPipeline:
             reused_count = sum(1 for c in clip_selections if c.is_reused)
             logger.info(f"  Reused clips: {reused_count}")
             
+            # Display detailed summary for the user
+            print("\n" + "="*100)
+            print(f"{'SEGMENT ID':<12} | {'START':<8} | {'END':<8} | {'SCORE':<8} | {'SOURCE VIDEO FILE'}")
+            print("-" * 100)
+            for c in clip_selections:
+                filename = Path(c.video_file_path).name
+                print(f"{c.segment_id:<12} | {c.trim_start:<8.2f} | {c.trim_end:<8.2f} | {c.similarity_score:<8.3f} | {filename}")
+            print("="*100 + "\n")
+            
             return clip_selections
         
         except Exception as e:
