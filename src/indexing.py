@@ -1,11 +1,15 @@
 """
-Video Indexing Module using VideoPrism
+Video Indexing Module using VideoPrism LVT
 
 This module is responsible for:
 1. Loading B-roll video files from a directory
-2. Extracting features using VideoPrism
+2. Extracting GLOBAL embeddings using VideoPrism LVT (Language-Vision-Text model)
 3. Storing embeddings in a searchable vector database (FAISS)
 4. Providing methods to retrieve similar videos based on text queries
+
+IMPORTANT: This module uses the LVT model which produces global embeddings
+with shape (feature_channels,) that are compatible with text embeddings
+for cosine similarity matching.
 """
 
 import os
@@ -45,28 +49,32 @@ class VideoMetadata:
     fps: float
     width: int
     height: int
-    embedding_shape: Tuple[int, int]
+    embedding_dim: int  # Changed from embedding_shape to single dimension
 
 
 class VideoIndexer:
     """
-    VideoPrism-based video indexing system.
+    VideoPrism LVT-based video indexing system.
     
-    This class handles loading videos, extracting embeddings using VideoPrism,
-    and storing them in a FAISS index for efficient similarity search.
+    This class handles loading videos, extracting GLOBAL embeddings using 
+    VideoPrism LVT, and storing them in a FAISS index for efficient 
+    similarity search with text queries.
+    
+    The LVT model produces embeddings of shape (batch_size, feature_channels)
+    which can be directly compared with text embeddings using cosine similarity.
     """
     
     def __init__(
         self,
-        model_name: str = 'videoprism_public_v1_base',
+        model_name: str = 'videoprism_lvt_public_v1_base',  # Use LVT model!
         index_dir: str = './video_index',
         device: str = 'cuda:0'
     ):
         """
-        Initialize the VideoIndexer.
+        Initialize the VideoIndexer with LVT model.
         
         Args:
-            model_name: VideoPrism model to use ('videoprism_public_v1_base' or 'videoprism_public_v1_large')
+            model_name: VideoPrism LVT model to use (must be an LVT model for text matching)
             index_dir: Directory to store the FAISS index and metadata
             device: Device to use ('cuda:0', 'cuda:1', etc., or 'cpu')
         """
@@ -75,26 +83,40 @@ class VideoIndexer:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
         
+        # Ensure we're using an LVT model
+        if 'lvt' not in model_name.lower():
+            logger.warning(f"Model {model_name} is not an LVT model. "
+                          f"For text-video matching, use 'videoprism_lvt_public_v1_base' or 'videoprism_lvt_public_v1_large'")
+        
         # Set JAX to use specific GPU
         if 'cuda' in device:
             gpu_id = int(device.split(':')[1]) if ':' in device else 0
             os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
             logger.info(f"Setting JAX to use GPU {gpu_id}")
         
-        # Load VideoPrism model
-        logger.info(f"Loading VideoPrism model: {model_name}")
+        # Load VideoPrism LVT model
+        logger.info(f"Loading VideoPrism LVT model: {model_name}")
         if vp is None:
             raise ImportError("VideoPrism not installed. Run: pip install videoprism")
         
         self.flax_model = vp.get_model(model_name)
         self.loaded_state = vp.load_pretrained_weights(model_name)
+        self.text_tokenizer = vp.load_text_tokenizer('c4_en')
         
-        # Define the forward function with JIT compilation
+        # Define the forward function for video-only embedding (text=None)
         @jax.jit
-        def forward_fn(inputs):
-            return self.flax_model.apply(self.loaded_state, inputs, train=False)
+        def forward_video_fn(video_inputs):
+            # For LVT model: pass None for text to get only video embeddings
+            video_embeddings, _, _ = self.flax_model.apply(
+                self.loaded_state,
+                video_inputs,
+                None,  # text_token_ids = None
+                None,  # text_token_paddings = None
+                train=False
+            )
+            return video_embeddings
         
-        self.forward_fn = forward_fn
+        self.forward_video_fn = forward_video_fn
         
         # Initialize FAISS index
         if faiss is None:
@@ -104,7 +126,7 @@ class VideoIndexer:
         self.metadata_list: List[VideoMetadata] = []
         self.video_id_to_idx: Dict[str, int] = {}
         
-        logger.info("VideoIndexer initialized successfully")
+        logger.info("VideoIndexer initialized successfully with LVT model")
     
     def extract_frames(
         self,
@@ -117,8 +139,8 @@ class VideoIndexer:
         
         Args:
             video_path: Path to the video file
-            num_frames: Number of frames to extract
-            target_size: Target frame size (height, width)
+            num_frames: Number of frames to extract (default 16 for VideoPrism-B)
+            target_size: Target frame size (height, width) - must be 288x288 for VideoPrism
         
         Returns:
             Tuple of (frames array, video info dict)
@@ -134,7 +156,7 @@ class VideoIndexer:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         duration = total_frames / fps if fps > 0 else 0
         
-        # Calculate frame indices to extract
+        # Calculate frame indices to extract (uniformly sampled)
         if total_frames <= num_frames:
             frame_indices = list(range(total_frames))
         else:
@@ -146,11 +168,11 @@ class VideoIndexer:
             ret, frame = cap.read()
             
             if ret:
-                # Resize frame
+                # Resize frame to 288x288
                 frame = cv2.resize(frame, target_size)
                 # Convert BGR to RGB
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Normalize to [0, 1]
+                # Normalize to [0, 1] as required by VideoPrism
                 frame = frame.astype(np.float32) / 255.0
                 frames.append(frame)
         
@@ -162,7 +184,7 @@ class VideoIndexer:
         # Pad or trim to exact num_frames
         frames = np.array(frames)
         if len(frames) < num_frames:
-            # Pad with last frame
+            # Pad with last frame (for very short videos)
             padding = np.tile(frames[-1:], (num_frames - len(frames), 1, 1, 1))
             frames = np.concatenate([frames, padding], axis=0)
         elif len(frames) > num_frames:
@@ -181,13 +203,13 @@ class VideoIndexer:
     
     def get_video_embedding(self, video_path: str) -> Tuple[np.ndarray, Dict]:
         """
-        Extract embedding for a single video.
+        Extract GLOBAL embedding for a single video using LVT model.
         
         Args:
             video_path: Path to the video file
         
         Returns:
-            Tuple of (embedding array, video info dict)
+            Tuple of (embedding array with shape (feature_channels,), video info dict)
         """
         # Extract frames
         frames, video_info = self.extract_frames(video_path)
@@ -195,18 +217,18 @@ class VideoIndexer:
         # Add batch dimension: [1, num_frames, height, width, 3]
         frames_batch = np.expand_dims(frames, axis=0)
         
-        # Get embedding from VideoPrism
-        outputs, _ = self.forward_fn(frames_batch)
+        # Get GLOBAL embedding from VideoPrism LVT
+        # Shape: [batch_size, feature_channels] -> [1, 768] for base model
+        video_embeddings = self.forward_video_fn(frames_batch)
         
-        # outputs shape: [batch_size, num_tokens, feature_channels]
-        # For batch_size=1: [1, num_frames * 16 * 16, feature_channels]
-        embedding = np.array(outputs[0])  # Remove batch dimension
+        # Remove batch dimension: [768]
+        embedding = np.array(video_embeddings[0])
         
         return embedding, video_info
     
     def index_videos(self, video_dir: str) -> int:
         """
-        Index all videos in a directory.
+        Index all videos in a directory using LVT global embeddings.
         
         Args:
             video_dir: Directory containing video files
@@ -240,7 +262,7 @@ class VideoIndexer:
                     logger.info(f"Video {video_id} already indexed, skipping")
                     continue
                 
-                # Extract embedding
+                # Extract GLOBAL embedding
                 embedding, video_info = self.get_video_embedding(str(video_file))
                 
                 # Store metadata
@@ -252,20 +274,19 @@ class VideoIndexer:
                     fps=video_info['fps'],
                     width=video_info['width'],
                     height=video_info['height'],
-                    embedding_shape=embedding.shape
+                    embedding_dim=embedding.shape[0]
                 )
                 
                 self.metadata_list.append(metadata)
                 self.video_id_to_idx[video_id] = len(self.metadata_list) - 1
                 
-                # Flatten embedding for FAISS
-                embedding_flat = embedding.reshape(embedding.shape[0], -1)
-                embeddings_list.append(embedding_flat)
+                # Embedding is already flat: (768,)
+                embeddings_list.append(embedding)
                 
                 if feature_dim is None:
-                    feature_dim = embedding_flat.shape[1]
+                    feature_dim = embedding.shape[0]
                 
-                logger.info(f"Indexed {video_id}: embedding shape {embedding.shape}")
+                logger.info(f"Indexed {video_id}: embedding dim {embedding.shape[0]}")
             
             except Exception as e:
                 logger.error(f"Error indexing {video_file}: {e}")
@@ -275,18 +296,22 @@ class VideoIndexer:
             logger.error("No videos were successfully indexed")
             return 0
         
-        # Create FAISS index
+        # Create FAISS index with cosine similarity (normalize + L2 = cosine)
         logger.info(f"Creating FAISS index with {len(embeddings_list)} videos")
         embeddings_array = np.vstack(embeddings_list).astype(np.float32)
         
-        # Use IndexFlatL2 for L2 distance
-        self.index = faiss.IndexFlatL2(embeddings_array.shape[1])
+        # Normalize embeddings for cosine similarity
+        norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
+        embeddings_array = embeddings_array / (norms + 1e-8)
+        
+        # Use IndexFlatIP for inner product (cosine similarity after normalization)
+        self.index = faiss.IndexFlatIP(embeddings_array.shape[1])
         self.index.add(embeddings_array)
         
         # Save index and metadata
         self.save_index()
         
-        logger.info(f"Successfully indexed {len(embeddings_list)} videos")
+        logger.info(f"Successfully indexed {len(embeddings_list)} videos with LVT embeddings")
         return len(embeddings_list)
     
     def search_by_embedding(
@@ -295,26 +320,33 @@ class VideoIndexer:
         k: int = 5
     ) -> List[Tuple[str, float, VideoMetadata]]:
         """
-        Search for similar videos using an embedding.
+        Search for similar videos using a text embedding.
         
         Args:
-            query_embedding: Query embedding (flattened)
+            query_embedding: Query embedding (shape: feature_channels,)
             k: Number of results to return
         
         Returns:
-            List of tuples (video_id, distance, metadata)
+            List of tuples (video_id, similarity_score, metadata)
+            Higher similarity scores are better (cosine similarity)
         """
         if self.index is None:
             raise RuntimeError("Index not initialized. Call index_videos() first.")
         
+        # Normalize query for cosine similarity
         query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
-        distances, indices = self.index.search(query_embedding, k)
+        query_norm = np.linalg.norm(query_embedding)
+        if query_norm > 0:
+            query_embedding = query_embedding / query_norm
+        
+        # Search returns similarity scores (higher is better for IndexFlatIP)
+        similarities, indices = self.index.search(query_embedding, k)
         
         results = []
-        for idx, distance in zip(indices[0], distances[0]):
-            if idx < len(self.metadata_list):
+        for idx, similarity in zip(indices[0], similarities[0]):
+            if idx < len(self.metadata_list) and idx >= 0:
                 metadata = self.metadata_list[idx]
-                results.append((metadata.video_id, float(distance), metadata))
+                results.append((metadata.video_id, float(similarity), metadata))
         
         return results
     
@@ -350,13 +382,20 @@ class VideoIndexer:
             logger.warning("Index files not found")
             return False
         
+        # Load metadata first to check model compatibility
+        with open(metadata_path, 'r') as f:
+            data = json.load(f)
+        
+        # Check if index was created with LVT model
+        saved_model = data.get('model_name', '')
+        if 'lvt' not in saved_model.lower():
+            logger.warning(f"Existing index was created with non-LVT model ({saved_model}). "
+                          f"Re-indexing required for text-video matching.")
+            return False
+        
         # Load FAISS index
         self.index = faiss.read_index(str(index_path))
         logger.info(f"Loaded FAISS index from {index_path}")
-        
-        # Load metadata
-        with open(metadata_path, 'r') as f:
-            data = json.load(f)
         
         self.metadata_list = [
             VideoMetadata(**m) for m in data['metadata']
@@ -369,6 +408,6 @@ class VideoIndexer:
 
 if __name__ == '__main__':
     # Example usage
-    indexer = VideoIndexer()
+    indexer = VideoIndexer(model_name='videoprism_lvt_public_v1_base')
     num_indexed = indexer.index_videos('./data/input/videos')
     print(f"Indexed {num_indexed} videos")

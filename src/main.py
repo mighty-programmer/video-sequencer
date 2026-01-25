@@ -87,7 +87,7 @@ class VideoSequencingPipeline:
         self,
         llm_model: str = 'meta-llama/Llama-3.2-3B-Instruct',
         whisper_model: str = 'base',
-        videoprism_model: str = 'videoprism_public_v1_base',
+        videoprism_model: str = 'videoprism_lvt_public_v1_base',
         use_simple_segmentation: bool = False
     ) -> Optional[Path]:
         """
@@ -415,9 +415,9 @@ Examples:
     )
     parser.add_argument(
         '--videoprism-model',
-        default='videoprism_public_v1_base',
-        choices=['videoprism_public_v1_base', 'videoprism_public_v1_large'],
-        help='VideoPrism model to use (default: videoprism_public_v1_base)'
+        default='videoprism_lvt_public_v1_base',
+        choices=['videoprism_lvt_public_v1_base', 'videoprism_lvt_public_v1_large'],
+        help='VideoPrism LVT model to use for video-text matching (default: videoprism_lvt_public_v1_base)'
     )
     parser.add_argument(
         '--llm-model',
