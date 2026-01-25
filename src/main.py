@@ -139,7 +139,8 @@ class VideoSequencingPipeline:
         use_simple_segmentation: bool = False,
         manual_segments_file: str = None,
         match_only: bool = False,
-        allow_reuse: bool = True
+        allow_reuse: bool = True,
+        use_optimal: bool = True
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -152,6 +153,7 @@ class VideoSequencingPipeline:
             manual_segments_file: Path to JSON file with manual segments (skips transcription & segmentation)
             match_only: If True, bypass transcription and duration constraints (test mode)
             allow_reuse: Whether to allow reusing videos
+            use_optimal: If True, use Hungarian Algorithm for optimal matching; if False, use greedy
         
         Returns:
             Path to output video or None if failed
@@ -161,8 +163,12 @@ class VideoSequencingPipeline:
             logger.info("Starting Video Sequencing Pipeline")
             if match_only:
                 logger.info("MODE: Match-Only Test Mode (Bypassing transcription & duration constraints)")
-                if not allow_reuse:
-                    logger.info("REUSE: Disabled (Each segment will have a unique clip)")
+            if use_optimal:
+                logger.info("MATCHING: Optimal (Hungarian Algorithm)")
+            else:
+                logger.info("MATCHING: Greedy (Sequential)")
+            if not allow_reuse:
+                logger.info("REUSE: Disabled (Each segment will have a unique clip)")
             logger.info("=" * 80)
             
             # Check FFmpeg availability
@@ -205,7 +211,12 @@ class VideoSequencingPipeline:
             
             # Step 4: Match segments to videos
             logger.info("\n[STEP 4] Matching script segments to video clips...")
-            clip_selections = self._match_and_sequence(segments, match_only=match_only, allow_reuse=allow_reuse)
+            clip_selections = self._match_and_sequence(
+                segments, 
+                match_only=match_only, 
+                allow_reuse=allow_reuse,
+                use_optimal=use_optimal
+            )
             if clip_selections is None:
                 return None
             
@@ -397,7 +408,8 @@ class VideoSequencingPipeline:
         self,
         segments,
         match_only: bool = False,
-        allow_reuse: bool = True
+        allow_reuse: bool = True,
+        use_optimal: bool = True
     ):
         """Match script segments to video clips"""
         try:
@@ -422,7 +434,8 @@ class VideoSequencingPipeline:
                 segment_dicts,
                 self.matcher,
                 match_only=match_only,
-                allow_reuse=allow_reuse
+                allow_reuse=allow_reuse,
+                use_optimal=use_optimal
             )
             
             if not clip_selections:
@@ -595,6 +608,13 @@ Examples:
         help='Prevent reusing the same video clip for multiple segments'
     )
     parser.add_argument(
+        '--greedy',
+        action='store_false',
+        dest='use_optimal',
+        default=True,
+        help='Use greedy sequential matching instead of optimal Hungarian Algorithm'
+    )
+    parser.add_argument(
         '--whisper-model',
         default='base',
         choices=['tiny', 'base', 'small', 'medium', 'large'],
@@ -666,7 +686,8 @@ Examples:
         use_simple_segmentation=args.simple_segmentation,
         manual_segments_file=args.segments,
         match_only=args.match_only,
-        allow_reuse=args.allow_reuse
+        allow_reuse=args.allow_reuse,
+        use_optimal=args.use_optimal
     )
     
     if output_video:
