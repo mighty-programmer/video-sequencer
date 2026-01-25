@@ -72,12 +72,16 @@ def load_manual_segments(segments_file: str) -> List[ScriptSegment]:
     
     segments = []
     for i, seg_data in enumerate(data.get('segments', [])):
+        # For match-only mode, start/end times might be missing or 0
+        start_time = seg_data.get('start_time', 0.0)
+        end_time = seg_data.get('end_time', 0.0)
+        
         segment = ScriptSegment(
             segment_id=i,
             text=seg_data['text'],
-            start_time=seg_data['start_time'],
-            end_time=seg_data['end_time'],
-            duration=seg_data['end_time'] - seg_data['start_time'],
+            start_time=start_time,
+            end_time=end_time,
+            duration=end_time - start_time,
             description=seg_data.get('description'),
             keywords=seg_data.get('keywords'),
             action_type=seg_data.get('action_type')
@@ -109,7 +113,7 @@ class VideoSequencingPipeline:
             gpu_device: GPU device to use (e.g., 'cuda:0', 'cuda:1', or 'cpu')
         """
         self.video_dir = Path(video_dir)
-        self.audio_file = Path(audio_file)
+        self.audio_file = Path(audio_file) if audio_file else None
         self.output_dir = Path(output_dir)
         self.cache_dir = Path(cache_dir)
         self.gpu_device = gpu_device
@@ -133,7 +137,8 @@ class VideoSequencingPipeline:
         whisper_model: str = 'base',
         videoprism_model: str = 'videoprism_lvt_public_v1_base',
         use_simple_segmentation: bool = False,
-        manual_segments_file: str = None
+        manual_segments_file: str = None,
+        match_only: bool = False
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -144,6 +149,7 @@ class VideoSequencingPipeline:
             videoprism_model: VideoPrism model to use
             use_simple_segmentation: Use simple rule-based segmentation instead of LLM
             manual_segments_file: Path to JSON file with manual segments (skips transcription & segmentation)
+            match_only: If True, bypass transcription and duration constraints (test mode)
         
         Returns:
             Path to output video or None if failed
@@ -151,6 +157,8 @@ class VideoSequencingPipeline:
         try:
             logger.info("=" * 80)
             logger.info("Starting Video Sequencing Pipeline")
+            if match_only:
+                logger.info("MODE: Match-Only Test Mode (Bypassing transcription & duration constraints)")
             logger.info("=" * 80)
             
             # Check FFmpeg availability
@@ -167,13 +175,17 @@ class VideoSequencingPipeline:
             if not self._index_videos(videoprism_model):
                 return None
             
-            # Check if using manual segments
-            if manual_segments_file:
-                logger.info("\n[STEP 2-3] Loading manual segments (skipping transcription & LLM segmentation)...")
+            # Check if using manual segments or match-only mode
+            if manual_segments_file or match_only:
+                if not manual_segments_file:
+                    logger.error("Match-only mode requires a segments file (--segments).")
+                    return None
+                    
+                logger.info(f"\n[STEP 2-3] Loading manual segments from {manual_segments_file}...")
                 segments = self._load_manual_segments(manual_segments_file)
                 if segments is None:
                     return None
-                transcription = None  # No transcription needed for manual segments
+                transcription = None
             else:
                 # Step 2: Transcribe audio
                 logger.info("\n[STEP 2] Transcribing voice-over audio...")
@@ -189,11 +201,15 @@ class VideoSequencingPipeline:
             
             # Step 4: Match segments to videos
             logger.info("\n[STEP 4] Matching script segments to video clips...")
-            clip_selections = self._match_and_sequence(segments)
+            clip_selections = self._match_and_sequence(segments, match_only=match_only)
             if clip_selections is None:
                 return None
             
-            # Step 5: Assemble and export
+            # Step 5: Assemble and export (Skip if match_only and no audio)
+            if match_only and not self.audio_file:
+                logger.info("\n[STEP 5] Skipping video assembly in match-only mode (no audio provided).")
+                return self.output_dir
+            
             logger.info("\n[STEP 5] Assembling and exporting final video...")
             output_video = self._assemble_video(clip_selections, transcription)
             
@@ -282,6 +298,10 @@ class VideoSequencingPipeline:
     def _transcribe_audio(self, model_size: str):
         """Transcribe voice-over audio"""
         try:
+            if not self.audio_file:
+                logger.error("No audio file provided for transcription")
+                return None
+                
             cache_file = self.cache_dir / 'transcription.json'
             
             # Check if transcription already exists
@@ -359,7 +379,8 @@ class VideoSequencingPipeline:
     
     def _match_and_sequence(
         self,
-        segments
+        segments,
+        match_only: bool = False
     ):
         """Match script segments to video clips"""
         try:
@@ -382,7 +403,8 @@ class VideoSequencingPipeline:
             # Create sequence
             clip_selections = create_sequence(
                 segment_dicts,
-                self.matcher
+                self.matcher,
+                match_only=match_only
             )
             
             if not clip_selections:
@@ -431,6 +453,10 @@ class VideoSequencingPipeline:
     def _assemble_video(self, clip_selections, transcription) -> Optional[Path]:
         """Assemble and export final video"""
         try:
+            if not self.audio_file:
+                logger.error("No audio file provided for assembly")
+                return None
+                
             self.assembler = VideoAssembler(use_ffmpeg=True)
             builder = VideoSequenceBuilder(self.assembler, temp_dir=str(self.cache_dir / 'temp'))
             
@@ -459,36 +485,19 @@ def main():
     parser = argparse.ArgumentParser(
         description='Video Clip Selection and Sequencing via Language and Vision Models',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=\"\"\"
 Examples:
   # Basic usage
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output
   
-  # With custom models
-  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
-    --whisper-model medium --llm-model meta-llama/Llama-3.2-3B-Instruct
-  
-  # Use simple segmentation (no LLM required)
-  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
-    --simple-segmentation
-  
-  # Use manual segments (skip transcription & segmentation entirely)
+  # Use manual segments (skip transcription & segmentation)
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
     --segments ./my_segments.json
 
-Manual Segments JSON Format:
-  {
-    "segments": [
-      {
-        "text": "Script text for matching",
-        "start_time": 0.0,
-        "end_time": 5.5,
-        "description": "Optional description",
-        "keywords": ["optional", "keywords"]
-      }
-    ]
-  }
-        """
+  # Match-Only Test Mode (Bypass transcription and duration constraints)
+  python main.py --video-dir ./videos --output ./output \\
+    --segments ./my_segments.json --match-only
+        \"\"\"
     )
     
     parser.add_argument(
@@ -498,7 +507,7 @@ Manual Segments JSON Format:
     )
     parser.add_argument(
         '--audio',
-        required=True,
+        required=False,
         help='Path to voice-over audio file'
     )
     parser.add_argument(
@@ -514,7 +523,12 @@ Manual Segments JSON Format:
     parser.add_argument(
         '--segments',
         default=None,
-        help='Path to JSON file with manual segments (skips transcription & LLM segmentation)'
+        help='Path to JSON file with manual segments'
+    )
+    parser.add_argument(
+        '--match-only',
+        action='store_true',
+        help='Test mode: Bypass transcription and duration constraints'
     )
     parser.add_argument(
         '--whisper-model',
@@ -536,7 +550,7 @@ Manual Segments JSON Format:
     parser.add_argument(
         '--simple-segmentation',
         action='store_true',
-        help='Use simple rule-based segmentation instead of LLM (faster, no model download required)'
+        help='Use simple rule-based segmentation instead of LLM'
     )
     parser.add_argument(
         '--gpu-device',
@@ -560,7 +574,11 @@ Manual Segments JSON Format:
         logger.error(f"Video directory not found: {args.video_dir}")
         sys.exit(1)
     
-    if not Path(args.audio).exists():
+    if not args.match_only and not args.audio:
+        logger.error("Audio file is required unless using --match-only mode")
+        sys.exit(1)
+        
+    if args.audio and not Path(args.audio).exists():
         logger.error(f"Audio file not found: {args.audio}")
         sys.exit(1)
     
@@ -582,7 +600,8 @@ Manual Segments JSON Format:
         whisper_model=args.whisper_model,
         videoprism_model=args.videoprism_model,
         use_simple_segmentation=args.simple_segmentation,
-        manual_segments_file=args.segments
+        manual_segments_file=args.segments,
+        match_only=args.match_only
     )
     
     if output_video:

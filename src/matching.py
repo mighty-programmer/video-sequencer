@@ -142,7 +142,8 @@ class VideoTextMatcher:
         segment_duration: float,
         k: int = 10,
         allow_reuse: bool = True,
-        used_videos: Optional[Set[str]] = None
+        used_videos: Optional[Set[str]] = None,
+        match_only: bool = False
     ) -> List[Dict]:
         """
         Find the best matching video clips for a script segment.
@@ -153,6 +154,7 @@ class VideoTextMatcher:
             k: Number of top candidates to return
             allow_reuse: Whether to allow reusing videos
             used_videos: Set of already used video IDs
+            match_only: If True, ignore duration compatibility and diversity penalties
             
         Returns:
             List of candidate dictionaries sorted by combined score
@@ -185,25 +187,32 @@ class VideoTextMatcher:
             # Normalize to [0, 1] for scoring
             similarity_score = (similarity + 1.0) / 2.0
             
-            # Boost score if video hasn't been used yet (Diversity Boost)
-            diversity_multiplier = 1.2 if video_id not in used_videos else 0.8
-            
-            # Penalize if it was the VERY LAST video used (Sequential Diversity)
-            if self.used_videos_history and self.used_videos_history[-1] == video_id:
-                diversity_multiplier *= 0.5
-            
-            # Calculate motion score (duration compatibility)
-            motion_score = self._calculate_motion_score(metadata, segment_duration)
-            
-            # Calculate context score (filename keyword matching)
-            context_score = self._calculate_context_score(segment_text, metadata)
-            
-            # Combined score with weighted factors
-            combined_score = (
-                0.5 * similarity_score * diversity_multiplier +
-                0.3 * motion_score +
-                0.2 * context_score
-            )
+            if match_only:
+                # In match-only mode, we only care about semantic similarity and context
+                motion_score = 1.0
+                diversity_multiplier = 1.0
+                context_score = self._calculate_context_score(segment_text, metadata)
+                combined_score = (0.8 * similarity_score) + (0.2 * context_score)
+            else:
+                # Boost score if video hasn't been used yet (Diversity Boost)
+                diversity_multiplier = 1.2 if video_id not in used_videos else 0.8
+                
+                # Penalize if it was the VERY LAST video used (Sequential Diversity)
+                if self.used_videos_history and self.used_videos_history[-1] == video_id:
+                    diversity_multiplier *= 0.5
+                
+                # Calculate motion score (duration compatibility)
+                motion_score = self._calculate_motion_score(metadata, segment_duration)
+                
+                # Calculate context score (filename keyword matching)
+                context_score = self._calculate_context_score(segment_text, metadata)
+                
+                # Combined score with weighted factors
+                combined_score = (
+                    0.5 * similarity_score * diversity_multiplier +
+                    0.3 * motion_score +
+                    0.2 * context_score
+                )
             
             candidates.append({
                 'video_id': video_id,
@@ -281,7 +290,8 @@ class VideoTextMatcher:
     def select_best_clip(
         self,
         candidates: List[Dict],
-        segment_duration: float
+        segment_duration: float,
+        match_only: bool = False
     ) -> Optional[Dict]:
         """
         Select the best clip from candidates and calculate trim times.
@@ -289,6 +299,7 @@ class VideoTextMatcher:
         Args:
             candidates: List of candidate dictionaries
             segment_duration: Duration needed for the segment
+            match_only: If True, use full video duration instead of segment duration
             
         Returns:
             Best candidate with trim times added, or None if no candidates
@@ -297,7 +308,13 @@ class VideoTextMatcher:
             return None
         
         best = candidates[0]
-        trim_start, trim_end = self._calculate_trim_times(best['duration'], segment_duration)
+        
+        if match_only:
+            # In match-only mode, we use the full video
+            trim_start = 0.0
+            trim_end = best['duration']
+        else:
+            trim_start, trim_end = self._calculate_trim_times(best['duration'], segment_duration)
         
         best['trim_start'] = trim_start
         best['trim_end'] = trim_end
@@ -325,7 +342,8 @@ class VideoTextMatcher:
 
 def create_sequence(
     script_segments: List[Dict],
-    video_matcher: VideoTextMatcher
+    video_matcher: VideoTextMatcher,
+    match_only: bool = False
 ) -> List[ClipSelection]:
     """
     Create a sequence of video clips matched to script segments.
@@ -333,6 +351,7 @@ def create_sequence(
     Args:
         script_segments: List of segment dictionaries with 'text' and 'duration'
         video_matcher: VideoTextMatcher instance
+        match_only: If True, bypass duration constraints and diversity penalties
         
     Returns:
         List of ClipSelection objects representing the video sequence
@@ -352,10 +371,15 @@ def create_sequence(
         candidates = video_matcher.match_segment_to_videos(
             segment['text'], 
             segment['duration'], 
-            used_videos=used_videos
+            used_videos=used_videos,
+            match_only=match_only
         )
         
-        best_clip_data = video_matcher.select_best_clip(candidates, segment['duration'])
+        best_clip_data = video_matcher.select_best_clip(
+            candidates, 
+            segment['duration'],
+            match_only=match_only
+        )
         
         # 2. If no candidates found, use diversity-aware fallback
         if not best_clip_data:
@@ -365,16 +389,19 @@ def create_sequence(
             unused = [m for m in all_metadata if m.video_id not in used_videos]
             fallback_meta = unused[0] if unused else all_metadata[i % len(all_metadata)]
             
-            trim_start, trim_end = video_matcher._calculate_trim_times(
-                fallback_meta.duration, segment['duration']
-            )
+            if match_only:
+                trim_start, trim_end = 0.0, fallback_meta.duration
+            else:
+                trim_start, trim_end = video_matcher._calculate_trim_times(
+                    fallback_meta.duration, segment['duration']
+                )
             
             selection = ClipSelection(
                 segment_id=i,
                 video_id=fallback_meta.video_id,
                 video_file_path=fallback_meta.file_path,
                 start_time=0.0, end_time=0.0,  # Set later
-                duration=segment['duration'],
+                duration=segment['duration'] if not match_only else fallback_meta.duration,
                 trim_start=trim_start, 
                 trim_end=trim_end,
                 trim_duration=trim_end - trim_start,
@@ -389,7 +416,7 @@ def create_sequence(
                 video_id=best_clip_data['video_id'],
                 video_file_path=best_clip_data['file_path'],
                 start_time=0.0, end_time=0.0,
-                duration=segment['duration'],
+                duration=segment['duration'] if not match_only else best_clip_data['duration'],
                 trim_start=best_clip_data['trim_start'],
                 trim_end=best_clip_data['trim_end'],
                 trim_duration=best_clip_data['trim_duration'],
@@ -399,17 +426,15 @@ def create_sequence(
                 combined_score=best_clip_data['combined_score'],
                 is_reused=best_clip_data['is_reused']
             )
-            
+        
         sequence.append(selection)
         used_videos.add(selection.video_id)
-        logger.info(f"  -> Selected: {selection.video_id} (Score: {selection.combined_score:.3f}, "
-                   f"Similarity: {selection.similarity_score:.3f})")
     
-    # Set timeline positions
+    # Calculate start/end times in the final sequence
     current_time = 0.0
-    for s in sequence:
-        s.start_time = current_time
-        s.end_time = current_time + s.duration
-        current_time += s.duration
+    for selection in sequence:
+        selection.start_time = current_time
+        selection.end_time = current_time + selection.trim_duration
+        current_time = selection.end_time
         
     return sequence
