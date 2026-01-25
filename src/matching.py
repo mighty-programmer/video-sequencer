@@ -61,7 +61,7 @@ class VideoTextMatcher:
         video_indexer,
         model_name: str = 'videoprism_lvt_public_v1_base',
         device: str = 'gpu',
-        min_similarity_threshold: float = 0.0  # No minimum threshold by default
+        min_similarity_threshold: float = 0.0
     ):
         """
         Initialize the VideoTextMatcher.
@@ -116,6 +116,19 @@ class VideoTextMatcher:
         text_embeddings = forward_fn(text_ids, text_paddings)
         return np.array(text_embeddings[0])
     
+    def get_num_indexed_videos(self) -> int:
+        """Get the number of indexed videos."""
+        # VideoIndexer uses metadata_list (a list)
+        if hasattr(self.video_indexer, 'metadata_list'):
+            return len(self.video_indexer.metadata_list)
+        return 0
+    
+    def get_all_video_metadata(self) -> List:
+        """Get all video metadata from the indexer."""
+        if hasattr(self.video_indexer, 'metadata_list'):
+            return self.video_indexer.metadata_list
+        return []
+    
     def match_segment_to_videos(
         self,
         segment_text: str,
@@ -145,8 +158,12 @@ class VideoTextMatcher:
         # Get text embedding
         text_embedding = self.get_text_embedding(segment_text)
         
-        # Search for similar videos - get more candidates to ensure we find matches
-        num_videos = len(self.video_indexer.metadata) if hasattr(self.video_indexer, 'metadata') else 100
+        # Get number of indexed videos
+        num_videos = self.get_num_indexed_videos()
+        if num_videos == 0:
+            logger.error("No videos indexed! Cannot match segments.")
+            return []
+        
         search_k = min(num_videos, k * 5)  # Get more candidates
         results = self.video_indexer.search_by_embedding(text_embedding, k=search_k)
         
@@ -157,8 +174,7 @@ class VideoTextMatcher:
                 continue
             
             # Calculate similarity score using exponential decay
-            # This gives better scores for closer matches
-            similarity_score = np.exp(-distance / 10.0)  # Softer decay
+            similarity_score = np.exp(-distance / 10.0)
             
             # Ensure minimum score for any video
             similarity_score = max(similarity_score, 0.1)
@@ -196,33 +212,23 @@ class VideoTextMatcher:
             logger.debug(f"Top 3 candidates:")
             for i, c in enumerate(candidates[:3]):
                 logger.debug(f"  {i+1}. {c['video_id']}: sim={c['similarity_score']:.3f}, motion={c['motion_score']:.3f}, combined={c['combined_score']:.3f}")
+        else:
+            logger.warning(f"No candidates found for segment!")
         
         return candidates[:k]
     
     def _calculate_motion_score(self, metadata, segment_duration: float) -> float:
         """
         Calculate motion score based on video duration match.
-        
-        A video is scored higher if its duration is close to or longer than
-        the segment duration, allowing for trimming without losing important context.
-        
-        Args:
-            metadata: VideoMetadata object
-            segment_duration: Duration of the script segment
-        
-        Returns:
-            Motion score (0-1)
         """
         video_duration = metadata.duration
         
         if video_duration == 0 or segment_duration == 0:
-            return 0.5  # Neutral score for edge cases
+            return 0.5
         
         ratio = video_duration / segment_duration
         
         if ratio >= 1.0:
-            # Video is longer than or equal to segment - good!
-            # Score decreases slightly for very long videos
             if ratio <= 2.0:
                 return 1.0
             elif ratio <= 5.0:
@@ -230,25 +236,13 @@ class VideoTextMatcher:
             else:
                 return 0.7
         else:
-            # Video is shorter than segment - can still use it
-            # Score based on how much of the segment it covers
             return max(0.3, ratio * 0.8)
     
     def _calculate_context_score(self, segment_text: str, metadata) -> float:
         """
         Calculate context score based on segment keywords.
-        
-        Args:
-            segment_text: Text of the segment
-            metadata: VideoMetadata object
-        
-        Returns:
-            Context score (0-1)
         """
-        # Extract keywords from segment text
         keywords = self._extract_keywords(segment_text)
-        
-        # Check if video filename contains any keywords
         video_name = metadata.file_path.lower() if hasattr(metadata, 'file_path') else ''
         
         matches = sum(1 for kw in keywords if kw in video_name)
@@ -256,20 +250,12 @@ class VideoTextMatcher:
         if matches > 0:
             return min(1.0, 0.5 + matches * 0.2)
         
-        # Return neutral score if no keyword matches
         return 0.5
     
     def _extract_keywords(self, text: str) -> List[str]:
         """
         Extract keywords from text.
-        
-        Args:
-            text: Input text
-        
-        Returns:
-            List of keywords
         """
-        # Simple keyword extraction (can be improved with NLP)
         stop_words = {
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
             'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
@@ -284,7 +270,6 @@ class VideoTextMatcher:
             'dont', "don't", 'got', 'get', 'getting', 'going', 'go', 'goes'
         }
         
-        # Clean and split text
         import re
         words = re.findall(r'\b[a-z]+\b', text.lower())
         keywords = [w for w in words if w not in stop_words and len(w) > 2]
@@ -299,30 +284,19 @@ class VideoTextMatcher:
     ) -> Optional[Dict]:
         """
         Select the best clip from candidates.
-        
-        Args:
-            candidates: List of candidate matches
-            segment_duration: Duration of the script segment
-            prefer_non_reused: Prefer non-reused clips if possible
-        
-        Returns:
-            Best candidate or None
         """
         if not candidates:
             logger.warning("No candidates provided to select_best_clip")
             return None
         
-        # If prefer_non_reused, filter out reused clips first
         working_candidates = candidates.copy()
         if prefer_non_reused:
             non_reused = [c for c in working_candidates if not c['is_reused']]
             if non_reused:
                 working_candidates = non_reused
         
-        # Select top candidate - ALWAYS return a match if we have candidates
         best = working_candidates[0]
         
-        # Calculate trim times
         video_duration = best['duration']
         trim_start, trim_end = self._calculate_trim_times(
             video_duration,
@@ -344,20 +318,10 @@ class VideoTextMatcher:
     ) -> Tuple[float, float]:
         """
         Calculate trim start and end times for a video clip.
-        
-        Args:
-            video_duration: Duration of the video
-            segment_duration: Duration of the script segment
-        
-        Returns:
-            Tuple of (trim_start, trim_end)
         """
         if video_duration <= segment_duration:
-            # Video is shorter or equal to segment, use entire video
             return 0.0, video_duration
         
-        # Video is longer than segment
-        # Try to center the important part (middle of video)
         excess_duration = video_duration - segment_duration
         trim_start = excess_duration / 2
         trim_end = trim_start + segment_duration
@@ -386,26 +350,28 @@ def create_sequence(
     sequence = []
     used_videos = set()
     
+    # Get all metadata for fallback
+    all_metadata = video_matcher.get_all_video_metadata()
+    
     for i, segment in enumerate(script_segments):
         logger.info(f"Processing segment {i+1}/{len(script_segments)}")
         
         candidates = video_matcher.match_segment_to_videos(
             segment_text=segment['text'],
             segment_duration=segment['duration'],
-            k=20,  # Get more candidates
+            k=20,
             allow_reuse=allow_reuse,
             used_videos=used_videos
         )
         
         if not candidates:
             logger.warning(f"  -> No candidates found for segment {i+1}, trying with reuse allowed")
-            # Try again with reuse allowed
             candidates = video_matcher.match_segment_to_videos(
                 segment_text=segment['text'],
                 segment_duration=segment['duration'],
                 k=20,
                 allow_reuse=True,
-                used_videos=set()  # Empty set to get all videos
+                used_videos=set()
             )
         
         best_clip_data = video_matcher.select_best_clip(
@@ -419,8 +385,8 @@ def create_sequence(
                 segment_id=i,
                 video_id=best_clip_data['video_id'],
                 video_file_path=best_clip_data['file_path'],
-                start_time=0.0,  # Placeholder, will be set during assembly
-                end_time=0.0,  # Placeholder
+                start_time=0.0,
+                end_time=0.0,
                 duration=segment['duration'],
                 trim_start=best_clip_data['trim_start'],
                 trim_end=best_clip_data['trim_end'],
@@ -437,9 +403,9 @@ def create_sequence(
         else:
             logger.warning(f"  -> No suitable clip found for segment {i+1}")
             # Create a placeholder selection using the first available video
-            if video_matcher.video_indexer.metadata:
-                first_video_id = list(video_matcher.video_indexer.metadata.keys())[0]
-                first_metadata = video_matcher.video_indexer.metadata[first_video_id]
+            if all_metadata:
+                first_metadata = all_metadata[0]
+                first_video_id = first_metadata.video_id
                 logger.info(f"  -> Using fallback video: {first_video_id}")
                 
                 selection = ClipSelection(
@@ -460,5 +426,7 @@ def create_sequence(
                 )
                 sequence.append(selection)
                 used_videos.add(selection.video_id)
+            else:
+                logger.error(f"  -> No videos available for fallback!")
     
     return sequence
