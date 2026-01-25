@@ -26,6 +26,7 @@ from transcription import VoiceTranscriber, TranscriptionAnalyzer
 from segmentation import ScriptSegmenter, ScriptSegment
 from matching import VideoTextMatcher, create_sequence
 from assembly import VideoAssembler, VideoSequenceBuilder
+from benchmark import BenchmarkEvaluator
 
 
 # Configure logging
@@ -140,7 +141,8 @@ class VideoSequencingPipeline:
         manual_segments_file: str = None,
         match_only: bool = False,
         allow_reuse: bool = True,
-        use_optimal: bool = True
+        use_optimal: bool = True,
+        ground_truth_file: str = None
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -154,6 +156,7 @@ class VideoSequencingPipeline:
             match_only: If True, bypass transcription and duration constraints (test mode)
             allow_reuse: Whether to allow reusing videos
             use_optimal: If True, use Hungarian Algorithm for optimal matching; if False, use greedy
+            ground_truth_file: Path to JSON file with ground truth clip mappings for benchmarking
         
         Returns:
             Path to output video or None if failed
@@ -169,6 +172,8 @@ class VideoSequencingPipeline:
                 logger.info("MATCHING: Greedy (Sequential)")
             if not allow_reuse:
                 logger.info("REUSE: Disabled (Each segment will have a unique clip)")
+            if ground_truth_file:
+                logger.info(f"BENCHMARK: Evaluating against ground truth: {ground_truth_file}")
             logger.info("=" * 80)
             
             # Check FFmpeg availability
@@ -215,7 +220,8 @@ class VideoSequencingPipeline:
                 segments, 
                 match_only=match_only, 
                 allow_reuse=allow_reuse,
-                use_optimal=use_optimal
+                use_optimal=use_optimal,
+                ground_truth_file=ground_truth_file
             )
             if clip_selections is None:
                 return None
@@ -409,7 +415,8 @@ class VideoSequencingPipeline:
         segments,
         match_only: bool = False,
         allow_reuse: bool = True,
-        use_optimal: bool = True
+        use_optimal: bool = True,
+        ground_truth_file: str = None
     ):
         """Match script segments to video clips"""
         try:
@@ -428,6 +435,15 @@ class VideoSequencingPipeline:
                 }
                 for seg in segments
             ]
+            
+            # Compute similarity matrix if we need it for benchmarking
+            similarity_matrix = None
+            all_metadata = None
+            if ground_truth_file:
+                logger.info("Computing full similarity matrix for benchmark evaluation...")
+                similarity_matrix, all_metadata = self.matcher.compute_similarity_matrix(
+                    segment_dicts, match_only=match_only
+                )
             
             # Create sequence
             clip_selections = create_sequence(
@@ -513,6 +529,38 @@ class VideoSequencingPipeline:
                     
                     print(f"{c.segment_id:<12} | {c.trim_start:<8.2f} | {c.trim_end:<8.2f} | {c.combined_score:<8.3f} | {rel_path}")
                 print("="*120 + "\n")
+            
+            # Benchmark evaluation if ground truth is provided
+            if ground_truth_file:
+                logger.info("\n[BENCHMARK] Evaluating predictions against ground truth...")
+                try:
+                    evaluator = BenchmarkEvaluator(ground_truth_file)
+                    
+                    # Get all metadata if not already computed
+                    if all_metadata is None:
+                        all_metadata = self.matcher.get_all_video_metadata()
+                    
+                    # Run evaluation
+                    benchmark_results = evaluator.evaluate(
+                        clip_selections=clip_selections,
+                        segment_dicts=segment_dicts,
+                        similarity_matrix=similarity_matrix,
+                        all_metadata=all_metadata,
+                        matching_mode='optimal' if use_optimal else 'greedy',
+                        allow_reuse=allow_reuse,
+                        match_only=match_only
+                    )
+                    
+                    # Print results to console
+                    evaluator.print_results(benchmark_results)
+                    
+                    # Save results to file
+                    benchmark_output_dir = self.output_dir / 'benchmark_results'
+                    results_file = evaluator.save_results(benchmark_results, benchmark_output_dir)
+                    logger.info(f"Benchmark results saved to: {results_file}")
+                    
+                except Exception as e:
+                    logger.error(f"Benchmark evaluation failed: {e}")
             
             return clip_selections
         
@@ -615,6 +663,11 @@ Examples:
         help='Use greedy sequential matching instead of optimal Hungarian Algorithm'
     )
     parser.add_argument(
+        '--ground-truth',
+        default=None,
+        help='Path to JSON file with ground truth clip mappings for benchmark evaluation'
+    )
+    parser.add_argument(
         '--whisper-model',
         default='base',
         choices=['tiny', 'base', 'small', 'medium', 'large'],
@@ -670,6 +723,10 @@ Examples:
         logger.error(f"Segments file not found: {args.segments}")
         sys.exit(1)
     
+    if args.ground_truth and not Path(args.ground_truth).exists():
+        logger.error(f"Ground truth file not found: {args.ground_truth}")
+        sys.exit(1)
+    
     # Run pipeline
     pipeline = VideoSequencingPipeline(
         video_dir=args.video_dir,
@@ -687,7 +744,8 @@ Examples:
         manual_segments_file=args.segments,
         match_only=args.match_only,
         allow_reuse=args.allow_reuse,
-        use_optimal=args.use_optimal
+        use_optimal=args.use_optimal,
+        ground_truth_file=args.ground_truth
     )
     
     if output_video:
