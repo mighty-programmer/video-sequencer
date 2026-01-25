@@ -485,19 +485,19 @@ def main():
     parser = argparse.ArgumentParser(
         description='Video Clip Selection and Sequencing via Language and Vision Models',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=\"\"\"
+        epilog="""
 Examples:
   # Basic usage
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output
   
   # Use manual segments (skip transcription & segmentation)
-  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \
     --segments ./my_segments.json
 
   # Match-Only Test Mode (Bypass transcription and duration constraints)
-  python main.py --video-dir ./videos --output ./output \\
+  python main.py --video-dir ./videos --output ./output \
     --segments ./my_segments.json --match-only
-        \"\"\"
+        """
     )
     
     parser.add_argument(
