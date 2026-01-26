@@ -7,6 +7,10 @@ This module is responsible for:
 3. Computing accuracy metrics and statistics
 4. Saving benchmark results to files
 
+IMPORTANT: This module is EVALUATION-ONLY. It is called AFTER clip selection
+is complete and NEVER influences the matching process. The ground truth file
+is only used for scoring and comparison purposes.
+
 Metrics computed:
 - Exact Match Accuracy: % of segments where the predicted clip exactly matches ground truth
 - Top-K Accuracy: % of segments where ground truth is in top K predictions
@@ -73,6 +77,10 @@ class BenchmarkResults:
 class BenchmarkEvaluator:
     """
     Evaluates video-text matching predictions against ground truth.
+    
+    IMPORTANT: This class is for EVALUATION ONLY. It receives already-completed
+    clip selections and compares them to ground truth. It NEVER influences
+    the matching algorithm.
     """
     
     def __init__(self, ground_truth_file: str):
@@ -321,7 +329,7 @@ class BenchmarkEvaluator:
         return json_path
     
     def _generate_summary_text(self, results: BenchmarkResults) -> str:
-        """Generate human-readable summary text."""
+        """Generate human-readable summary text for file output."""
         lines = [
             "=" * 80,
             "BENCHMARK EVALUATION RESULTS",
@@ -354,10 +362,25 @@ class BenchmarkEvaluator:
             "",
         ]
         
+        # Add comparison map
+        lines.extend([
+            "-" * 80,
+            "SEGMENT COMPARISON MAP",
+            "-" * 80,
+            "",
+        ])
+        
+        for seg in results.segment_results:
+            match_symbol = "✓" if seg['is_exact_match'] else "✗"
+            lines.append(f"[{seg['segment_id']:2d}] {match_symbol} {seg['segment_text'][:50]}")
+            lines.append(f"     Predicted:    {seg['predicted_clip']}")
+            lines.append(f"     Ground Truth: {seg['ground_truth_clip']}")
+            lines.append("")
+        
         if results.mismatch_details:
             lines.extend([
                 "-" * 80,
-                f"MISMATCHES ({results.mismatches} total)",
+                f"MISMATCH DETAILS ({results.mismatches} total)",
                 "-" * 80,
                 "",
             ])
@@ -378,8 +401,103 @@ class BenchmarkEvaluator:
         return "\n".join(lines)
     
     def print_results(self, results: BenchmarkResults):
-        """Print benchmark results to console."""
-        print(self._generate_summary_text(results))
+        """Print beautiful benchmark results to console."""
+        
+        # Header
+        print("\n")
+        print("╔" + "═" * 78 + "╗")
+        print("║" + " " * 20 + "BENCHMARK EVALUATION RESULTS" + " " * 30 + "║")
+        print("╠" + "═" * 78 + "╣")
+        
+        # Metadata
+        print(f"║  Benchmark: {results.benchmark_name:<64} ║")
+        print(f"║  Mode: {results.matching_mode:<10}  │  Reuse: {'Yes' if results.allow_reuse else 'No':<5}  │  Match-Only: {'Yes' if results.match_only else 'No':<5}           ║")
+        print(f"║  Segments: {results.num_segments:<5}  │  Videos: {results.num_videos:<5}                                       ║")
+        print("╠" + "═" * 78 + "╣")
+        
+        # Accuracy Metrics with visual bars
+        print("║" + " " * 30 + "ACCURACY METRICS" + " " * 32 + "║")
+        print("╟" + "─" * 78 + "╢")
+        
+        # Exact Match with bar
+        bar_len = int(results.exact_match_accuracy / 100 * 40)
+        bar = "█" * bar_len + "░" * (40 - bar_len)
+        print(f"║  Exact Match:     {results.exact_match_accuracy:6.2f}%  [{bar}]  ║")
+        
+        # Top-3 with bar
+        bar_len = int(results.top_3_accuracy / 100 * 40)
+        bar = "█" * bar_len + "░" * (40 - bar_len)
+        print(f"║  Top-3 Accuracy:  {results.top_3_accuracy:6.2f}%  [{bar}]  ║")
+        
+        # Top-5 with bar
+        bar_len = int(results.top_5_accuracy / 100 * 40)
+        bar = "█" * bar_len + "░" * (40 - bar_len)
+        print(f"║  Top-5 Accuracy:  {results.top_5_accuracy:6.2f}%  [{bar}]  ║")
+        
+        # MRR with bar
+        bar_len = int(results.mean_reciprocal_rank * 40)
+        bar = "█" * bar_len + "░" * (40 - bar_len)
+        print(f"║  MRR Score:       {results.mean_reciprocal_rank:6.4f}   [{bar}]  ║")
+        
+        print("╠" + "═" * 78 + "╣")
+        
+        # Similarity Statistics
+        print("║" + " " * 28 + "SIMILARITY STATISTICS" + " " * 29 + "║")
+        print("╟" + "─" * 78 + "╢")
+        print(f"║  Avg Predicted Similarity:     {results.avg_predicted_similarity:8.4f}                                ║")
+        print(f"║  Avg Ground Truth Similarity:  {results.avg_ground_truth_similarity:8.4f}                                ║")
+        print(f"║  Correlation:                  {results.similarity_correlation:8.4f}                                ║")
+        
+        print("╠" + "═" * 78 + "╣")
+        
+        # Comparison Map Header
+        print("║" + " " * 25 + "SEGMENT COMPARISON MAP" + " " * 31 + "║")
+        print("╟" + "─" * 78 + "╢")
+        print("║  SEG │ MATCH │ SEGMENT TEXT                    │ PREDICTED vs GROUND TRUTH    ║")
+        print("╟" + "─" * 78 + "╢")
+        
+        # Comparison rows
+        for seg in results.segment_results:
+            match_symbol = " ✓ " if seg['is_exact_match'] else " ✗ "
+            seg_text = seg['segment_text'][:30] + "..." if len(seg['segment_text']) > 30 else seg['segment_text']
+            pred_clip = seg['predicted_clip'][:12] + ".." if len(seg['predicted_clip']) > 14 else seg['predicted_clip']
+            gt_clip = seg['ground_truth_clip'][:12] + ".." if len(seg['ground_truth_clip']) > 14 else seg['ground_truth_clip']
+            
+            # Pad strings for alignment
+            seg_text = f"{seg_text:<33}"
+            comparison = f"{pred_clip:<14} │ {gt_clip:<14}"
+            
+            print(f"║  {seg['segment_id']:3d} │{match_symbol}│ {seg_text}│ {comparison}║")
+        
+        print("╠" + "═" * 78 + "╣")
+        
+        # Final Score Summary
+        print("║" + " " * 32 + "FINAL SCORE" + " " * 35 + "║")
+        print("╟" + "─" * 78 + "╢")
+        
+        # Big percentage display
+        score = results.exact_match_accuracy
+        score_str = f"{score:.1f}%"
+        padding = (78 - len(score_str) - 20) // 2
+        print(f"║{' ' * padding}EXACT MATCH ACCURACY: {score_str}{' ' * (78 - padding - len(score_str) - 22)}║")
+        
+        # Score interpretation
+        if score >= 80:
+            interpretation = "EXCELLENT - VideoPrism matching is highly accurate!"
+        elif score >= 60:
+            interpretation = "GOOD - Matching is working reasonably well."
+        elif score >= 40:
+            interpretation = "MODERATE - Some improvement needed."
+        elif score >= 20:
+            interpretation = "POOR - Significant mismatch between predictions and ground truth."
+        else:
+            interpretation = "VERY POOR - Matching is essentially random."
+        
+        interp_padding = (78 - len(interpretation)) // 2
+        print(f"║{' ' * interp_padding}{interpretation}{' ' * (78 - interp_padding - len(interpretation))}║")
+        
+        print("╚" + "═" * 78 + "╝")
+        print("\n")
 
 
 def load_ground_truth(file_path: str) -> Dict:
