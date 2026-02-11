@@ -144,7 +144,8 @@ class VideoSequencingPipeline:
         use_optimal: bool = True,
         ground_truth_file: str = None,
         window_size: float = 10.0,
-        window_stride: float = 5.0
+        window_stride: float = 5.0,
+        use_speed_control: bool = True
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -179,6 +180,7 @@ class VideoSequencingPipeline:
             if ground_truth_file:
                 logger.info(f"BENCHMARK: Evaluating against ground truth: {ground_truth_file}")
             logger.info(f"WINDOWING: size={window_size}s, stride={window_stride}s")
+            logger.info(f"SPEED CONTROL: {'Enabled' if use_speed_control else 'Disabled'}")
             logger.info("=" * 80)
             
             # Check FFmpeg availability
@@ -237,7 +239,7 @@ class VideoSequencingPipeline:
                 return self.output_dir
             
             logger.info("\n[STEP 5] Assembling and exporting final video...")
-            output_video = self._assemble_video(clip_selections, transcription)
+            output_video = self._assemble_video(clip_selections, transcription, use_speed_control=use_speed_control)
             
             if output_video:
                 logger.info("=" * 80)
@@ -575,7 +577,7 @@ class VideoSequencingPipeline:
             logger.error(f"Error matching and sequencing: {e}")
             return None
     
-    def _assemble_video(self, clip_selections, transcription) -> Optional[Path]:
+    def _assemble_video(self, clip_selections, transcription, use_speed_control: bool = True) -> Optional[Path]:
         """Assemble and export final video"""
         try:
             if not self.audio_file:
@@ -590,7 +592,8 @@ class VideoSequencingPipeline:
             success = builder.build_sequence(
                 clip_selections,
                 str(self.audio_file),
-                str(output_path)
+                str(output_path),
+                use_speed_control=use_speed_control
             )
             
             if success:
@@ -714,6 +717,13 @@ Examples:
         help='Stride between windows in seconds (default: 5.0)'
     )
     parser.add_argument(
+        '--no-speed-control',
+        action='store_false',
+        dest='use_speed_control',
+        help='Disable smart speed control (clips will not be sped up/slowed down)'
+    )
+    parser.set_defaults(use_speed_control=True)
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -766,7 +776,8 @@ Examples:
         use_optimal=args.use_optimal,
         ground_truth_file=args.ground_truth,
         window_size=args.window_size,
-        window_stride=args.window_stride
+        window_stride=args.window_stride,
+        use_speed_control=args.use_speed_control
     )
     
     if output_video:
