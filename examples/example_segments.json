@@ -1,0 +1,32 @@
+{
+  "segments": [
+    {
+      "text": "Still using your phone for navigation, it's dangerous and you know it.",
+      "start_time": 0.0,
+      "end_time": 5.5,
+      "description": "Person using phone while driving, dangerous behavior",
+      "keywords": ["phone", "navigation", "dangerous", "driving"]
+    },
+    {
+      "text": "Upgrade to this smart car display with a 10 inch 4K screen.",
+      "start_time": 5.5,
+      "end_time": 12.0,
+      "description": "Car display product showcase, 4K screen features",
+      "keywords": ["car", "display", "screen", "4K", "upgrade"]
+    },
+    {
+      "text": "Easy installation, just plug and play, no dashboard modification needed.",
+      "start_time": 12.0,
+      "end_time": 18.5,
+      "description": "Installation process, plug and play demonstration",
+      "keywords": ["installation", "easy", "plug", "play", "dashboard"]
+    },
+    {
+      "text": "Get yours now before they sell out, link in the comments.",
+      "start_time": 18.5,
+      "end_time": 22.0,
+      "description": "Call to action, purchase prompt",
+      "keywords": ["buy", "purchase", "link", "comments", "sale"]
+    }
+  ]
+}

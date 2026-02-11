@@ -1,0 +1,28 @@
+{
+  "name": "benchmark_2_cooking",
+  "description": "Ground truth mappings for the cooking video benchmark (crispy potato balls)",
+  "created_by": "manual_annotation",
+  "mappings": [
+    {"segment_id": 0, "clip": "intro_snack.mp4", "notes": "Opening shot showing snack"},
+    {"segment_id": 1, "clip": "potato_balls_close.mp4", "notes": "Close-up of crispy potato balls"},
+    {"segment_id": 2, "clip": "crunch_shot.mp4", "notes": "Crunchy texture shot"},
+    {"segment_id": 3, "clip": "flavor_shot.mp4", "notes": "Flavor/seasoning shot"},
+    {"segment_id": 4, "clip": "healthy_snack.mp4", "notes": "Healthy eating visual"},
+    {"segment_id": 5, "clip": "dice_potatoes.mp4", "notes": "Dicing potatoes"},
+    {"segment_id": 6, "clip": "cover_wrap.mp4", "notes": "Covering with plastic wrap"},
+    {"segment_id": 7, "clip": "plastic_wrap.mp4", "notes": "Plastic wrap close-up"},
+    {"segment_id": 8, "clip": "pierce_fork.mp4", "notes": "Piercing with fork"},
+    {"segment_id": 9, "clip": "microwave_settings.mp4", "notes": "Microwave settings display"},
+    {"segment_id": 10, "clip": "cooked_potatoes.mp4", "notes": "Cooked potatoes"},
+    {"segment_id": 11, "clip": "mash_smooth.mp4", "notes": "Mashing potatoes"},
+    {"segment_id": 12, "clip": "cool_down.mp4", "notes": "Cooling down"},
+    {"segment_id": 13, "clip": "add_seasonings.mp4", "notes": "Adding seasonings"},
+    {"segment_id": 14, "clip": "cornstarch.mp4", "notes": "Adding cornstarch"},
+    {"segment_id": 15, "clip": "mix_dough.mp4", "notes": "Mixing into dough"},
+    {"segment_id": 16, "clip": "shape_balls.mp4", "notes": "Shaping potato balls"},
+    {"segment_id": 17, "clip": "place_rack.mp4", "notes": "Placing on rack"},
+    {"segment_id": 18, "clip": "spray_oil.mp4", "notes": "Spraying with oil"},
+    {"segment_id": 19, "clip": "air_fryer_settings.mp4", "notes": "Air fryer settings"},
+    {"segment_id": 20, "clip": "enjoy_final.mp4", "notes": "Final result/enjoy shot"}
+  ]
+}
