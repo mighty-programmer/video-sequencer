@@ -58,14 +58,23 @@ class VideoTextMatcher:
         num_segments = len(script_segments)
         num_videos = len(all_metadata)
         
+        if num_videos == 0:
+            return np.zeros((num_segments, 0)), []
+            
         matrix = np.zeros((num_segments, num_videos))
         
         for i, segment in enumerate(script_segments):
-            results = self.indexer.search_by_text(segment['text'], k=num_videos)
-            # Map results back to matrix
-            meta_to_score = {res[0].video_id: res[1] for res in results}
-            for j, meta in enumerate(all_metadata):
-                matrix[i, j] = meta_to_score.get(meta.video_id, -1.0)
+            try:
+                results = self.indexer.search_by_text(segment['text'], k=num_videos)
+                # Map results back to matrix
+                # Use a dictionary for fast lookup by video_id
+                meta_to_score = {res[0].video_id: res[1] for res in results}
+                for j, meta in enumerate(all_metadata):
+                    matrix[i, j] = meta_to_score.get(meta.video_id, -1.0)
+            except Exception as e:
+                logger.error(f"Error computing similarity for segment {i}: {e}")
+                # Fill with -1.0 for this segment if search fails
+                matrix[i, :] = -1.0
                 
         return matrix, all_metadata
 

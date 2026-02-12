@@ -290,7 +290,12 @@ class VideoIndexer:
 
     def search_by_text(self, query_text: str, k: int = 5) -> List[Tuple[VideoMetadata, float]]:
         """Search for sub-clips matching the text query."""
-        text_inputs = self.text_tokenizer([query_text])
+        # Fix for 'SentencePieceTokenizer' object is not callable
+        if hasattr(self.text_tokenizer, 'tokenize'):
+            text_inputs = self.text_tokenizer.tokenize([query_text])
+        else:
+            text_inputs = self.text_tokenizer([query_text])
+            
         text_embeddings, _, _ = self.flax_model.apply(
             self.loaded_state,
             None,
