@@ -87,7 +87,15 @@ class VideoAssembler:
             True if successful, False otherwise
         """
         source_duration = end_time - start_time
-        if target_duration is None:
+        
+        # Safety: ensure we have valid durations
+        if source_duration <= 0:
+            logger.warning(f"Clip has zero/negative source duration ({start_time:.2f}s to {end_time:.2f}s). Using full file.")
+            start_time = 0.0
+            end_time = 1.0  # Use first 1 second as fallback
+            source_duration = 1.0
+            
+        if target_duration is None or target_duration <= 0:
             target_duration = source_duration
             
         speed_factor = source_duration / target_duration
@@ -114,6 +122,13 @@ class VideoAssembler:
     ) -> bool:
         """Trim and adjust speed using FFmpeg setpts filter"""
         source_duration = end_time - start_time
+        
+        # Safety: prevent division by zero
+        if source_duration <= 0:
+            source_duration = 0.1
+        if target_duration <= 0:
+            target_duration = source_duration
+            
         # pts_factor = target_duration / source_duration
         # To speed up (target < source), pts_factor < 1
         # To slow down (target > source), pts_factor > 1
