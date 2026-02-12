@@ -86,6 +86,12 @@ class VideoAssembler:
         Returns:
             True if successful, False otherwise
         """
+        # Safety check: ensure non-zero duration
+        if end_time <= start_time:
+            logger.warning(f"Zero or negative trim duration ({start_time:.2f}s to {end_time:.2f}s). "
+                          f"Extracting 1 second from start_time.")
+            end_time = start_time + 1.0
+        
         logger.info(f"Trimming {input_path} from {start_time:.2f}s to {end_time:.2f}s")
         
         try:

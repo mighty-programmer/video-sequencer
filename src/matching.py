@@ -398,7 +398,13 @@ class VideoTextMatcher:
         
         For windowed clips, window_start offsets the trim times so they
         are relative to the full source video file.
+        
+        If segment_duration is 0 or negative, uses the full video/window duration.
         """
+        # If segment duration is missing or zero, use the full clip/window
+        if segment_duration <= 0:
+            return window_start, window_start + video_duration
+        
         if video_duration <= segment_duration:
             return window_start, window_start + video_duration
         
