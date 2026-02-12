@@ -3,9 +3,10 @@ Video Assembly and Export Module
 
 This module is responsible for:
 1. Trimming video clips to specified durations
-2. Concatenating clips in sequence
-3. Adding audio (voice-over) to the final video
-4. Exporting to various formats
+2. Smart speed adjustment to synchronize clip duration with segment duration
+3. Concatenating clips in sequence
+4. Adding audio (voice-over) to the final video
+5. Exporting to various formats
 """
 
 import logging
@@ -38,7 +39,7 @@ class VideoAssembler:
     """
     Assembles video clips into a final sequence.
     
-    This class handles trimming, concatenating, and exporting video clips.
+    This class handles trimming, speed adjustment, concatenating, and exporting video clips.
     """
     
     def __init__(self, use_ffmpeg: bool = True):
@@ -147,6 +148,103 @@ class VideoAssembler:
             logger.error(f"MoviePy error: {e}")
             return False
     
+    def trim_and_speed_adjust(
+        self,
+        input_path: str,
+        output_path: str,
+        start_time: float,
+        end_time: float,
+        target_duration: float,
+        max_speed_factor: float = 2.0,
+        min_speed_factor: float = 0.5
+    ) -> bool:
+        """
+        Trim a video clip and adjust speed to match target duration.
+        
+        Uses smart speed control to synchronize clip duration with segment duration.
+        Speed adjustment is bounded to avoid unnatural playback.
+        
+        Args:
+            input_path: Path to input video
+            output_path: Path to output video
+            start_time: Start time in seconds
+            end_time: End time in seconds
+            target_duration: Desired output duration in seconds
+            max_speed_factor: Maximum speed multiplier (default 2.0x)
+            min_speed_factor: Minimum speed multiplier (default 0.5x)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        clip_duration = end_time - start_time
+        
+        if clip_duration <= 0 or target_duration <= 0:
+            logger.warning(f"Invalid durations: clip={clip_duration:.2f}s, target={target_duration:.2f}s")
+            return self.trim_video(input_path, output_path, start_time, end_time)
+        
+        speed_factor = clip_duration / target_duration
+        
+        # Clamp speed factor to acceptable range
+        speed_factor = max(min_speed_factor, min(max_speed_factor, speed_factor))
+        
+        # If speed adjustment is negligible, just trim normally
+        if abs(speed_factor - 1.0) < 0.05:
+            logger.info(f"Speed factor ~1.0, trimming without speed adjustment")
+            return self.trim_video(input_path, output_path, start_time, end_time)
+        
+        logger.info(f"Trimming {Path(input_path).name} [{start_time:.2f}s-{end_time:.2f}s] "
+                    f"with speed={speed_factor:.2f}x to match target={target_duration:.2f}s")
+        
+        try:
+            if self.use_ffmpeg:
+                return self._trim_and_speed_ffmpeg(
+                    input_path, output_path, start_time, end_time, speed_factor
+                )
+            else:
+                # Fallback: trim without speed adjustment
+                return self.trim_video(input_path, output_path, start_time, end_time)
+        except Exception as e:
+            logger.error(f"Error in trim_and_speed_adjust: {e}")
+            return self.trim_video(input_path, output_path, start_time, end_time)
+    
+    def _trim_and_speed_ffmpeg(
+        self,
+        input_path: str,
+        output_path: str,
+        start_time: float,
+        end_time: float,
+        speed_factor: float
+    ) -> bool:
+        """Trim and adjust speed using FFmpeg"""
+        duration = end_time - start_time
+        
+        # FFmpeg setpts filter: PTS*factor (< 1 = faster, > 1 = slower)
+        pts_factor = 1.0 / speed_factor
+        
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-ss', str(start_time),
+            '-t', str(duration),
+            '-filter:v', f'setpts={pts_factor:.4f}*PTS',
+            '-an',  # Remove audio (we'll add voiceover separately)
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-y',
+            output_path
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, check=True, timeout=300)
+            logger.info(f"Successfully trimmed+speed-adjusted to {output_path}")
+            return True
+        except subprocess.TimeoutExpired:
+            logger.error("Trim+speed operation timed out")
+            return False
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg error: {e.stderr.decode()}")
+            return False
+    
     def concatenate_videos(
         self,
         video_paths: List[str],
@@ -185,7 +283,6 @@ class VideoAssembler:
         # Write the concat list file with proper newlines
         with open(concat_file, 'w') as f:
             for video_path in video_paths:
-                # Use actual newline character, not escaped string
                 abs_path = str(Path(video_path).absolute())
                 f.write(f"file '{abs_path}'\n")
         
@@ -372,6 +469,9 @@ class VideoAssembler:
 class VideoSequenceBuilder:
     """
     Builds the final video sequence from clip selections.
+    
+    Supports smart speed control to synchronize each clip's duration
+    with its corresponding segment duration.
     """
     
     def __init__(self, assembler: VideoAssembler, temp_dir: str = './temp'):
@@ -390,7 +490,8 @@ class VideoSequenceBuilder:
         self,
         clip_selections: List,
         audio_path: str,
-        output_path: str
+        output_path: str,
+        use_speed_control: bool = True
     ) -> bool:
         """
         Build the final video sequence.
@@ -399,24 +500,38 @@ class VideoSequenceBuilder:
             clip_selections: List of ClipSelection objects
             audio_path: Path to voice-over audio
             output_path: Path to output video
+            use_speed_control: If True, adjust clip speed to match segment duration
         
         Returns:
             True if successful, False otherwise
         """
         logger.info(f"Building video sequence with {len(clip_selections)} clips")
+        if use_speed_control:
+            logger.info("Smart speed control enabled for duration synchronization")
         
         try:
-            # Step 1: Trim all clips
+            # Step 1: Trim (and optionally speed-adjust) all clips
             trimmed_clips = []
             for i, clip_sel in enumerate(clip_selections):
                 trimmed_path = self.temp_dir / f"clip_{i:03d}.mp4"
                 
-                success = self.assembler.trim_video(
-                    clip_sel.video_file_path,
-                    str(trimmed_path),
-                    clip_sel.trim_start,
-                    clip_sel.trim_end
-                )
+                if use_speed_control and clip_sel.duration > 0:
+                    # Use smart speed adjustment
+                    success = self.assembler.trim_and_speed_adjust(
+                        clip_sel.video_file_path,
+                        str(trimmed_path),
+                        clip_sel.trim_start,
+                        clip_sel.trim_end,
+                        target_duration=clip_sel.duration
+                    )
+                else:
+                    # Simple trim
+                    success = self.assembler.trim_video(
+                        clip_sel.video_file_path,
+                        str(trimmed_path),
+                        clip_sel.trim_start,
+                        clip_sel.trim_end
+                    )
                 
                 if success:
                     trimmed_clips.append(str(trimmed_path))

@@ -4,8 +4,9 @@ Video Indexing Module using VideoPrism LVT
 This module is responsible for:
 1. Loading B-roll video files from a directory
 2. Extracting GLOBAL embeddings using VideoPrism LVT (Language-Vision-Text model)
-3. Storing embeddings in a searchable vector database (FAISS)
-4. Providing methods to retrieve similar videos based on text queries
+3. Optionally using Temporal Sliding Windows for sub-clip indexing
+4. Storing embeddings in a searchable vector database (FAISS)
+5. Providing methods to retrieve similar videos based on text queries
 
 IMPORTANT: This module uses the LVT model which produces global embeddings
 with shape (feature_channels,) that are compatible with text embeddings
@@ -20,7 +21,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 import jax
 import jax.numpy as jnp
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import cv2
 from tqdm import tqdm
 
@@ -49,7 +50,12 @@ class VideoMetadata:
     fps: float
     width: int
     height: int
-    embedding_dim: int  # Changed from embedding_shape to single dimension
+    embedding_dim: int
+    # Windowing fields (optional, for sub-clip indexing)
+    window_start: float = 0.0
+    window_end: float = 0.0
+    is_windowed: bool = False
+    source_video_id: str = ""  # Original video ID before windowing
 
 
 class VideoIndexer:
@@ -60,13 +66,13 @@ class VideoIndexer:
     VideoPrism LVT, and storing them in a FAISS index for efficient 
     similarity search with text queries.
     
-    The LVT model produces embeddings of shape (batch_size, feature_channels)
-    which can be directly compared with text embeddings using cosine similarity.
+    Supports optional Temporal Sliding Window indexing for longer videos,
+    which creates multiple sub-clip entries per video for finer-grained matching.
     """
     
     def __init__(
         self,
-        model_name: str = 'videoprism_lvt_public_v1_base',  # Use LVT model!
+        model_name: str = 'videoprism_lvt_public_v1_base',
         index_dir: str = './video_index',
         device: str = 'cuda:0'
     ):
@@ -132,15 +138,19 @@ class VideoIndexer:
         self,
         video_path: str,
         num_frames: int = 16,
-        target_size: Tuple[int, int] = (288, 288)
+        target_size: Tuple[int, int] = (288, 288),
+        start_time: float = 0.0,
+        end_time: float = -1.0
     ) -> Tuple[np.ndarray, Dict]:
         """
-        Extract frames from a video file.
+        Extract frames from a video file (or a sub-clip window).
         
         Args:
             video_path: Path to the video file
             num_frames: Number of frames to extract (default 16 for VideoPrism-B)
             target_size: Target frame size (height, width) - must be 288x288 for VideoPrism
+            start_time: Start time in seconds for windowed extraction (default: 0.0)
+            end_time: End time in seconds for windowed extraction (default: -1.0 = full video)
         
         Returns:
             Tuple of (frames array, video info dict)
@@ -154,13 +164,25 @@ class VideoIndexer:
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration = total_frames / fps if fps > 0 else 0
+        full_duration = total_frames / fps if fps > 0 else 0
         
-        # Calculate frame indices to extract (uniformly sampled)
-        if total_frames <= num_frames:
-            frame_indices = list(range(total_frames))
+        # Calculate frame range for windowed extraction
+        if end_time > 0 and fps > 0:
+            start_frame = max(0, int(start_time * fps))
+            end_frame = min(total_frames, int(end_time * fps))
+            window_frames = end_frame - start_frame
+            duration = end_time - start_time
         else:
-            frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+            start_frame = 0
+            end_frame = total_frames
+            window_frames = total_frames
+            duration = full_duration
+        
+        # Calculate frame indices to extract (uniformly sampled within window)
+        if window_frames <= num_frames:
+            frame_indices = [start_frame + i for i in range(window_frames)]
+        else:
+            frame_indices = np.linspace(start_frame, end_frame - 1, num_frames, dtype=int)
         
         frames = []
         for frame_idx in frame_indices:
@@ -196,23 +218,33 @@ class VideoIndexer:
             'width': width,
             'height': height,
             'duration': duration,
+            'full_duration': full_duration,
             'extracted_frames': len(frames)
         }
         
         return frames, video_info
     
-    def get_video_embedding(self, video_path: str) -> Tuple[np.ndarray, Dict]:
+    def get_video_embedding(
+        self,
+        video_path: str,
+        start_time: float = 0.0,
+        end_time: float = -1.0
+    ) -> Tuple[np.ndarray, Dict]:
         """
-        Extract GLOBAL embedding for a single video using LVT model.
+        Extract GLOBAL embedding for a single video (or sub-clip) using LVT model.
         
         Args:
             video_path: Path to the video file
+            start_time: Start time for windowed extraction
+            end_time: End time for windowed extraction (-1 = full video)
         
         Returns:
             Tuple of (embedding array with shape (feature_channels,), video info dict)
         """
         # Extract frames
-        frames, video_info = self.extract_frames(video_path)
+        frames, video_info = self.extract_frames(
+            video_path, start_time=start_time, end_time=end_time
+        )
         
         # Add batch dimension: [1, num_frames, height, width, 3]
         frames_batch = np.expand_dims(frames, axis=0)
@@ -226,15 +258,64 @@ class VideoIndexer:
         
         return embedding, video_info
     
-    def index_videos(self, video_dir: str) -> int:
+    def _compute_windows(
+        self,
+        duration: float,
+        window_size: float = 5.0,
+        window_overlap: float = 0.5
+    ) -> List[Tuple[float, float]]:
+        """
+        Compute temporal sliding windows for a video.
+        
+        Args:
+            duration: Video duration in seconds
+            window_size: Size of each window in seconds
+            window_overlap: Overlap fraction between consecutive windows (0.0 to 0.9)
+            
+        Returns:
+            List of (start_time, end_time) tuples for each window
+        """
+        if duration <= window_size:
+            # Video is shorter than window size, use the whole video
+            return [(0.0, duration)]
+        
+        step_size = window_size * (1.0 - window_overlap)
+        windows = []
+        start = 0.0
+        
+        while start < duration:
+            end = min(start + window_size, duration)
+            # Only add window if it's at least half the window size
+            if end - start >= window_size * 0.5:
+                windows.append((start, end))
+            start += step_size
+        
+        # Ensure the last window covers the end of the video
+        if windows and windows[-1][1] < duration:
+            last_start = max(0.0, duration - window_size)
+            if last_start != windows[-1][0]:
+                windows.append((last_start, duration))
+        
+        return windows
+    
+    def index_videos(
+        self,
+        video_dir: str,
+        use_windowing: bool = True,
+        window_size: float = 5.0,
+        window_overlap: float = 0.5
+    ) -> int:
         """
         Index all videos in a directory using LVT global embeddings.
         
         Args:
             video_dir: Directory containing video files
+            use_windowing: If True, use temporal sliding windows for longer videos
+            window_size: Window size in seconds (only used if use_windowing=True)
+            window_overlap: Window overlap fraction (only used if use_windowing=True)
         
         Returns:
-            Number of videos indexed
+            Number of entries indexed (may be > number of video files if windowing is used)
         """
         video_dir = Path(video_dir)
         video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
@@ -249,44 +330,110 @@ class VideoIndexer:
             return 0
         
         logger.info(f"Found {len(video_files)} video files to index")
+        if use_windowing:
+            logger.info(f"Temporal windowing enabled: window_size={window_size}s, overlap={window_overlap}")
+        else:
+            logger.info("Temporal windowing disabled: indexing full videos only")
         
         embeddings_list = []
         feature_dim = None
         
         for video_file in tqdm(video_files, desc="Indexing videos"):
             try:
-                video_id = video_file.stem
+                base_video_id = video_file.stem
                 
-                # Skip if already indexed
-                if video_id in self.video_id_to_idx:
-                    logger.info(f"Video {video_id} already indexed, skipping")
-                    continue
+                if use_windowing:
+                    # Get video duration first
+                    cap = cv2.VideoCapture(str(video_file))
+                    if not cap.isOpened():
+                        logger.error(f"Cannot open video: {video_file}")
+                        continue
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    duration = total_frames / fps if fps > 0 else 0
+                    cap.release()
+                    
+                    # Compute windows
+                    windows = self._compute_windows(duration, window_size, window_overlap)
+                    
+                    for w_idx, (w_start, w_end) in enumerate(windows):
+                        if len(windows) == 1:
+                            # Only one window (short video) - use original ID
+                            video_id = base_video_id
+                        else:
+                            video_id = f"{base_video_id}_w{w_idx}"
+                        
+                        # Skip if already indexed
+                        if video_id in self.video_id_to_idx:
+                            logger.debug(f"Video {video_id} already indexed, skipping")
+                            continue
+                        
+                        # Extract embedding for this window
+                        embedding, video_info = self.get_video_embedding(
+                            str(video_file), start_time=w_start, end_time=w_end
+                        )
+                        
+                        metadata = VideoMetadata(
+                            video_id=video_id,
+                            file_path=str(video_file),
+                            duration=video_info['duration'],
+                            num_frames=video_info['extracted_frames'],
+                            fps=video_info['fps'],
+                            width=video_info['width'],
+                            height=video_info['height'],
+                            embedding_dim=embedding.shape[0],
+                            window_start=w_start,
+                            window_end=w_end,
+                            is_windowed=(len(windows) > 1),
+                            source_video_id=base_video_id
+                        )
+                        
+                        self.metadata_list.append(metadata)
+                        self.video_id_to_idx[video_id] = len(self.metadata_list) - 1
+                        embeddings_list.append(embedding)
+                        
+                        if feature_dim is None:
+                            feature_dim = embedding.shape[0]
+                        
+                        logger.debug(f"Indexed {video_id}: window [{w_start:.1f}s-{w_end:.1f}s]")
+                    
+                    logger.info(f"Indexed {base_video_id}: {len(windows)} window(s)")
                 
-                # Extract GLOBAL embedding
-                embedding, video_info = self.get_video_embedding(str(video_file))
-                
-                # Store metadata
-                metadata = VideoMetadata(
-                    video_id=video_id,
-                    file_path=str(video_file),
-                    duration=video_info['duration'],
-                    num_frames=video_info['extracted_frames'],
-                    fps=video_info['fps'],
-                    width=video_info['width'],
-                    height=video_info['height'],
-                    embedding_dim=embedding.shape[0]
-                )
-                
-                self.metadata_list.append(metadata)
-                self.video_id_to_idx[video_id] = len(self.metadata_list) - 1
-                
-                # Embedding is already flat: (768,)
-                embeddings_list.append(embedding)
-                
-                if feature_dim is None:
-                    feature_dim = embedding.shape[0]
-                
-                logger.info(f"Indexed {video_id}: embedding dim {embedding.shape[0]}")
+                else:
+                    # No windowing - index full video
+                    video_id = base_video_id
+                    
+                    # Skip if already indexed
+                    if video_id in self.video_id_to_idx:
+                        logger.info(f"Video {video_id} already indexed, skipping")
+                        continue
+                    
+                    # Extract GLOBAL embedding
+                    embedding, video_info = self.get_video_embedding(str(video_file))
+                    
+                    metadata = VideoMetadata(
+                        video_id=video_id,
+                        file_path=str(video_file),
+                        duration=video_info['duration'],
+                        num_frames=video_info['extracted_frames'],
+                        fps=video_info['fps'],
+                        width=video_info['width'],
+                        height=video_info['height'],
+                        embedding_dim=embedding.shape[0],
+                        window_start=0.0,
+                        window_end=video_info['duration'],
+                        is_windowed=False,
+                        source_video_id=video_id
+                    )
+                    
+                    self.metadata_list.append(metadata)
+                    self.video_id_to_idx[video_id] = len(self.metadata_list) - 1
+                    embeddings_list.append(embedding)
+                    
+                    if feature_dim is None:
+                        feature_dim = embedding.shape[0]
+                    
+                    logger.info(f"Indexed {video_id}: embedding dim {embedding.shape[0]}")
             
             except Exception as e:
                 logger.error(f"Error indexing {video_file}: {e}")
@@ -297,7 +444,7 @@ class VideoIndexer:
             return 0
         
         # Create FAISS index with cosine similarity (normalize + L2 = cosine)
-        logger.info(f"Creating FAISS index with {len(embeddings_list)} videos")
+        logger.info(f"Creating FAISS index with {len(embeddings_list)} entries")
         embeddings_array = np.vstack(embeddings_list).astype(np.float32)
         
         # Normalize embeddings for cosine similarity
@@ -311,14 +458,14 @@ class VideoIndexer:
         # Save index and metadata
         self.save_index()
         
-        logger.info(f"Successfully indexed {len(embeddings_list)} videos with LVT embeddings")
+        logger.info(f"Successfully indexed {len(embeddings_list)} entries with LVT embeddings")
         return len(embeddings_list)
     
     def search_by_embedding(
         self,
         query_embedding: np.ndarray,
         k: int = 5
-    ) -> List[Tuple[str, float, VideoMetadata]]:
+    ) -> List[Tuple[str, float, 'VideoMetadata']]:
         """
         Search for similar videos using a text embedding.
         
@@ -402,7 +549,7 @@ class VideoIndexer:
         ]
         self.video_id_to_idx = data['video_id_to_idx']
         
-        logger.info(f"Loaded metadata for {len(self.metadata_list)} videos")
+        logger.info(f"Loaded metadata for {len(self.metadata_list)} entries")
         return True
 
 
@@ -410,4 +557,4 @@ if __name__ == '__main__':
     # Example usage
     indexer = VideoIndexer(model_name='videoprism_lvt_public_v1_base')
     num_indexed = indexer.index_videos('./data/input/videos')
-    print(f"Indexed {num_indexed} videos")
+    print(f"Indexed {num_indexed} entries")

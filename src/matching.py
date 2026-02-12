@@ -391,14 +391,19 @@ class VideoTextMatcher:
     def _calculate_trim_times(
         self, 
         video_duration: float, 
-        segment_duration: float
+        segment_duration: float,
+        window_start: float = 0.0
     ) -> Tuple[float, float]:
-        """Calculate trim start and end times for a video clip."""
+        """Calculate trim start and end times for a video clip.
+        
+        For windowed clips, window_start offsets the trim times so they
+        are relative to the full source video file.
+        """
         if video_duration <= segment_duration:
-            return 0.0, video_duration
+            return window_start, window_start + video_duration
         
         trim_start = (video_duration - segment_duration) / 2
-        return trim_start, trim_start + segment_duration
+        return window_start + trim_start, window_start + trim_start + segment_duration
 
 
 def create_sequence_optimal(
@@ -463,11 +468,15 @@ def create_sequence_optimal(
             is_reused = metadata.video_id in used_videos
             used_videos.add(metadata.video_id)
             
+            # Get window offset for windowed clips
+            window_start = getattr(metadata, 'window_start', 0.0)
+            
             if match_only:
-                trim_start, trim_end = 0.0, metadata.duration
+                trim_start = window_start
+                trim_end = window_start + metadata.duration
             else:
                 trim_start, trim_end = video_matcher._calculate_trim_times(
-                    metadata.duration, segment['duration']
+                    metadata.duration, segment['duration'], window_start=window_start
                 )
             
             selection = ClipSelection(
@@ -548,11 +557,15 @@ def create_sequence_optimal(
                 
                 segment = script_segments[seg_idx]
                 
+                # Get window offset for windowed clips
+                window_start = getattr(metadata, 'window_start', 0.0)
+                
                 if match_only:
-                    trim_start, trim_end = 0.0, metadata.duration
+                    trim_start = window_start
+                    trim_end = window_start + metadata.duration
                 else:
                     trim_start, trim_end = video_matcher._calculate_trim_times(
-                        metadata.duration, segment['duration']
+                        metadata.duration, segment['duration'], window_start=window_start
                     )
                 
                 is_reused = metadata.video_id in used_videos

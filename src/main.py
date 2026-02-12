@@ -142,7 +142,10 @@ class VideoSequencingPipeline:
         match_only: bool = False,
         allow_reuse: bool = True,
         use_optimal: bool = True,
-        ground_truth_file: str = None
+        ground_truth_file: str = None,
+        use_windowing: bool = True,
+        window_size: float = 5.0,
+        window_overlap: float = 0.5
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -170,6 +173,10 @@ class VideoSequencingPipeline:
                 logger.info("MATCHING: Optimal (Hungarian Algorithm)")
             else:
                 logger.info("MATCHING: Greedy (Sequential)")
+            if use_windowing:
+                logger.info(f"WINDOWING: Enabled (window_size={window_size}s, overlap={window_overlap})")
+            else:
+                logger.info("WINDOWING: Disabled (full video indexing)")
             if not allow_reuse:
                 logger.info("REUSE: Disabled (Each segment will have a unique clip)")
             if ground_truth_file:
@@ -187,7 +194,12 @@ class VideoSequencingPipeline:
             
             # Step 1: Index videos
             logger.info("\n[STEP 1] Indexing B-roll videos...")
-            if not self._index_videos(videoprism_model):
+            if not self._index_videos(
+                videoprism_model,
+                use_windowing=use_windowing,
+                window_size=window_size,
+                window_overlap=window_overlap
+            ):
                 return None
             
             # Check if using manual segments or match-only mode
@@ -270,7 +282,13 @@ class VideoSequencingPipeline:
             logger.error(f"Error loading manual segments: {e}")
             return None
     
-    def _index_videos(self, model_name: str) -> bool:
+    def _index_videos(
+        self,
+        model_name: str,
+        use_windowing: bool = True,
+        window_size: float = 5.0,
+        window_overlap: float = 0.5
+    ) -> bool:
         """Index all videos in the video directory"""
         try:
             cache_file = self.cache_dir / 'video_index'
@@ -315,7 +333,12 @@ class VideoSequencingPipeline:
                         return True
             
             # Create new index
-            num_indexed = self.indexer.index_videos(str(self.video_dir))
+            num_indexed = self.indexer.index_videos(
+                str(self.video_dir),
+                use_windowing=use_windowing,
+                window_size=window_size,
+                window_overlap=window_overlap
+            )
             
             if num_indexed == 0:
                 logger.error("No videos were indexed")
@@ -695,6 +718,23 @@ Examples:
         help='GPU device to use (e.g., cuda:0, cuda:1, cuda:2, cuda:3, or cpu) (default: cuda:0)'
     )
     parser.add_argument(
+        '--no-windowing',
+        action='store_true',
+        help='Disable temporal sliding window indexing (index full videos only)'
+    )
+    parser.add_argument(
+        '--window-size',
+        type=float,
+        default=5.0,
+        help='Window size in seconds for temporal sliding window (default: 5.0)'
+    )
+    parser.add_argument(
+        '--window-overlap',
+        type=float,
+        default=0.5,
+        help='Window overlap fraction for temporal sliding window (default: 0.5)'
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -745,7 +785,10 @@ Examples:
         match_only=args.match_only,
         allow_reuse=args.allow_reuse,
         use_optimal=args.use_optimal,
-        ground_truth_file=args.ground_truth
+        ground_truth_file=args.ground_truth,
+        use_windowing=not args.no_windowing,
+        window_size=args.window_size,
+        window_overlap=args.window_overlap
     )
     
     if output_video:
