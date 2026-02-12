@@ -219,7 +219,8 @@ class VideoIndexer:
                 
                 # Determine windows
                 windows = []
-                if video_duration <= self.window_size:
+                if self.window_size <= 0 or video_duration <= self.window_size:
+                    # No windowing: treat entire video as a single clip
                     windows.append((0.0, video_duration))
                 else:
                     start = 0.0

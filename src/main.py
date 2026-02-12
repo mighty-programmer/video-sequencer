@@ -179,7 +179,10 @@ class VideoSequencingPipeline:
                 logger.info("REUSE: Disabled (Each segment will have a unique clip)")
             if ground_truth_file:
                 logger.info(f"BENCHMARK: Evaluating against ground truth: {ground_truth_file}")
-            logger.info(f"WINDOWING: size={window_size}s, stride={window_stride}s")
+            if window_size <= 0:
+                logger.info("WINDOWING: Disabled (each video indexed as a single clip)")
+            else:
+                logger.info(f"WINDOWING: size={window_size}s, stride={window_stride}s")
             logger.info(f"SPEED CONTROL: {'Enabled' if use_speed_control else 'Disabled'}")
             logger.info("=" * 80)
             
@@ -717,6 +720,11 @@ Examples:
         help='Stride between windows in seconds (default: 5.0)'
     )
     parser.add_argument(
+        '--no-windowing',
+        action='store_true',
+        help='Disable temporal windowing (index each video as a single clip). Recommended for short pre-cut clips.'
+    )
+    parser.add_argument(
         '--no-speed-control',
         action='store_false',
         dest='use_speed_control',
@@ -775,8 +783,8 @@ Examples:
         allow_reuse=args.allow_reuse,
         use_optimal=args.use_optimal,
         ground_truth_file=args.ground_truth,
-        window_size=args.window_size,
-        window_stride=args.window_stride,
+        window_size=0 if args.no_windowing else args.window_size,
+        window_stride=0 if args.no_windowing else args.window_stride,
         use_speed_control=args.use_speed_control
     )
     
