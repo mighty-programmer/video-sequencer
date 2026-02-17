@@ -40,22 +40,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-@dataclass
-class VideoMetadata:
-    """Metadata for indexed videos"""
-    video_id: str
-    file_path: str
-    duration: float
-    num_frames: int
-    fps: float
-    width: int
-    height: int
-    embedding_dim: int
-    # Windowing fields (optional, for sub-clip indexing)
-    window_start: float = 0.0
-    window_end: float = 0.0
-    is_windowed: bool = False
-    source_video_id: str = ""  # Original video ID before windowing
+from models import VideoMetadata
 
 
 class VideoIndexer:

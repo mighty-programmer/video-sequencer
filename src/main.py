@@ -20,13 +20,36 @@ import shutil
 from pathlib import Path
 from typing import Optional, List
 
-# Import modules
-from indexing import VideoIndexer
-from transcription import VoiceTranscriber, TranscriptionAnalyzer
-from segmentation import ScriptSegmenter, ScriptSegment
-from matching import VideoTextMatcher, create_sequence
+# Matching module (no JAX dependency)
+from matching import VideoTextMatcher, create_sequence, ClipSelection
+
+# VideoPrism-dependent imports (require JAX)
+try:
+    from indexing import VideoIndexer
+    VIDEOPRISM_AVAILABLE = True
+except ImportError:
+    VIDEOPRISM_AVAILABLE = False
+
+# Other imports (no JAX dependency)
+try:
+    from transcription import VoiceTranscriber, TranscriptionAnalyzer
+except ImportError:
+    pass
+
+try:
+    from segmentation import ScriptSegmenter, ScriptSegment
+except ImportError:
+    pass
+
 from assembly import VideoAssembler, VideoSequenceBuilder
 from benchmark import BenchmarkEvaluator
+
+# Optional OpenCLIP baseline imports
+try:
+    from openclip_indexing import OpenCLIPVideoIndexer, OpenCLIPTextMatcher
+    OPENCLIP_AVAILABLE = True
+except ImportError:
+    OPENCLIP_AVAILABLE = False
 
 
 # Configure logging
@@ -145,7 +168,9 @@ class VideoSequencingPipeline:
         ground_truth_file: str = None,
         use_windowing: bool = True,
         window_size: float = 5.0,
-        window_overlap: float = 0.5
+        window_overlap: float = 0.5,
+        encoder: str = 'videoprism',
+        openclip_model: str = 'ViT-B-32'
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -165,8 +190,16 @@ class VideoSequencingPipeline:
             Path to output video or None if failed
         """
         try:
-            logger.info("=" * 80)
+            # Store encoder choice for use in display and matching
+            self._encoder = encoder
+            self._openclip_model = openclip_model
+            
+            logger.info("="  * 80)
             logger.info("Starting Video Sequencing Pipeline")
+            if encoder == 'openclip':
+                logger.info(f"ENCODER: OpenCLIP ({openclip_model}) - Frame-level baseline")
+            else:
+                logger.info(f"ENCODER: VideoPrism ({videoprism_model}) - Temporal video understanding")
             if match_only:
                 logger.info("MODE: Match-Only Test Mode (Bypassing transcription & duration constraints)")
             if use_optimal:
@@ -291,13 +324,27 @@ class VideoSequencingPipeline:
     ) -> bool:
         """Index all videos in the video directory"""
         try:
-            cache_file = self.cache_dir / 'video_index'
-            
-            self.indexer = VideoIndexer(
-                model_name=model_name,
-                index_dir=str(cache_file),
-                device=self.gpu_device
-            )
+            # Choose indexer based on encoder selection
+            if self._encoder == 'openclip':
+                if not OPENCLIP_AVAILABLE:
+                    logger.error("OpenCLIP not available. Install with: pip install open_clip_torch")
+                    return False
+                cache_file = self.cache_dir / 'video_index_openclip'
+                self.indexer = OpenCLIPVideoIndexer(
+                    model_name=self._openclip_model,
+                    index_dir=str(cache_file),
+                    device=self.gpu_device
+                )
+            else:
+                if not VIDEOPRISM_AVAILABLE:
+                    logger.error("VideoPrism not available. Install JAX and videoprism, or use --encoder openclip")
+                    return False
+                cache_file = self.cache_dir / 'video_index'
+                self.indexer = VideoIndexer(
+                    model_name=model_name,
+                    index_dir=str(cache_file),
+                    device=self.gpu_device
+                )
             
             # Try to load existing index
             if self.indexer.load_index():
@@ -445,8 +492,11 @@ class VideoSequencingPipeline:
         try:
             cache_file = self.cache_dir / 'clip_selections.json'
             
-            # Initialize matcher
-            self.matcher = VideoTextMatcher(self.indexer)
+            # Initialize matcher based on encoder selection
+            if self._encoder == 'openclip':
+                self.matcher = OpenCLIPTextMatcher(self.indexer)
+            else:
+                self.matcher = VideoTextMatcher(self.indexer)
             
             # Convert segments to dict format expected by create_sequence
             segment_dicts = [
@@ -508,8 +558,9 @@ class VideoSequencingPipeline:
             # Display detailed summary for the user
             if match_only:
                 # Match-only mode: Show pure semantic similarity results
+                encoder_label = f"OpenCLIP ({self._openclip_model})" if self._encoder == 'openclip' else "VideoPrism"
                 print("\n" + "="*130)
-                print("MATCH-ONLY MODE: Pure VideoPrism Semantic Similarity Results")
+                print(f"MATCH-ONLY MODE: Pure {encoder_label} Semantic Similarity Results")
                 print("="*130)
                 print(f"{'SEG':<5} | {'COSINE SIM':<12} | {'REUSED?':<8} | {'VIDEO FILE':<50} | {'SEGMENT TEXT'}")
                 print("-" * 130)
@@ -735,6 +786,18 @@ Examples:
         help='Window overlap fraction for temporal sliding window (default: 0.5)'
     )
     parser.add_argument(
+        '--encoder',
+        default='videoprism',
+        choices=['videoprism', 'openclip'],
+        help='Video encoder to use: videoprism (temporal video understanding) or openclip (frame-level baseline) (default: videoprism)'
+    )
+    parser.add_argument(
+        '--openclip-model',
+        default='ViT-B-32',
+        choices=['ViT-B-32', 'ViT-B-16', 'ViT-L-14'],
+        help='OpenCLIP model to use when --encoder openclip is selected (default: ViT-B-32)'
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -788,7 +851,9 @@ Examples:
         ground_truth_file=args.ground_truth,
         use_windowing=not args.no_windowing,
         window_size=args.window_size,
-        window_overlap=args.window_overlap
+        window_overlap=args.window_overlap,
+        encoder=args.encoder,
+        openclip_model=args.openclip_model
     )
     
     if output_video:
