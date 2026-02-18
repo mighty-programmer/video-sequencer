@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import subprocess
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
@@ -121,44 +122,140 @@ def browse_file(prompt: str, default: str = None, extensions: List[str] = None) 
     return path
 
 
-def discover_benchmarks(base_dir: str = './data/benchmarks') -> List[Dict]:
-    """Auto-discover available benchmarks."""
+def discover_benchmark_numbers(base_dir: str = './data/benchmarks') -> List[Dict]:
+    """
+    Auto-discover available benchmarks by scanning the videos directory
+    for folders matching the pattern 'video_*'.
+    
+    Returns a list of benchmark dicts with number, paths, and status info.
+    The benchmark number is extracted from the video folder name.
+    Segments and ground truth paths are derived from the number.
+    """
     benchmarks = []
     base = Path(base_dir)
+    videos_dir = base / 'videos'
     
-    # Look for segment files
-    segments_dir = base / 'segments'
-    if segments_dir.exists():
-        for seg_file in sorted(segments_dir.glob('*.json')):
-            name = seg_file.stem.replace('_segments', '')
-            
-            # Try to find matching ground truth and video dir
-            gt_file = base / 'gdtruth' / f'{name}_ground_truth.json'
-            
-            # Try common video directory patterns
-            video_dir = None
-            for pattern in [base / 'videos' / name, base / 'videos' / name.replace('benchmark_', 'video_')]:
-                if pattern.exists():
-                    video_dir = str(pattern)
+    if not videos_dir.exists():
+        return benchmarks
+    
+    # Scan video directories for pattern video_*
+    for video_folder in sorted(videos_dir.iterdir()):
+        if not video_folder.is_dir():
+            continue
+        
+        # Extract benchmark number from folder name (e.g., video_2 -> 2, video_10 -> 10)
+        match = re.match(r'^video_(\d+)$', video_folder.name)
+        if not match:
+            continue
+        
+        bm_number = match.group(1)
+        
+        # Derive paths from the benchmark number
+        segments_file = base / 'segments' / f'benchmark_{bm_number}_segments.json'
+        gt_file = base / 'gdtruth' / f'benchmark_{bm_number}_ground_truth.json'
+        
+        # Count videos in the folder
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
+        video_count = sum(
+            1 for f in video_folder.iterdir()
+            if f.suffix.lower() in video_extensions
+        )
+        
+        # Count segments if file exists
+        segment_count = 0
+        if segments_file.exists():
+            try:
+                with open(segments_file, 'r') as f:
+                    seg_data = json.load(f)
+                if isinstance(seg_data, list):
+                    segment_count = len(seg_data)
+                elif isinstance(seg_data, dict):
+                    segment_count = len(seg_data.get('segments', seg_data.get('mappings', [])))
+            except Exception:
+                pass
+        
+        # Try to find audio
+        audio_file = None
+        audio_dir = base / 'audio'
+        if audio_dir.exists():
+            for pattern in [f'voiceover_{bm_number}.mp3', f'benchmark_{bm_number}.mp3']:
+                candidate = audio_dir / pattern
+                if candidate.exists():
+                    audio_file = str(candidate)
                     break
-            
-            # Try to find audio
-            audio_file = None
-            for pattern in [base / 'audio' / f'voiceover_{name.split("_")[-1]}.mp3',
-                          base / 'audio' / f'{name}.mp3']:
-                if pattern.exists():
-                    audio_file = str(pattern)
-                    break
-            
-            benchmarks.append({
-                'name': name,
-                'segments': str(seg_file),
-                'ground_truth': str(gt_file) if gt_file.exists() else None,
-                'video_dir': video_dir,
-                'audio': audio_file
-            })
+        
+        benchmarks.append({
+            'number': bm_number,
+            'name': f'benchmark_{bm_number}',
+            'video_dir': str(video_folder),
+            'segments': str(segments_file) if segments_file.exists() else None,
+            'ground_truth': str(gt_file) if gt_file.exists() else None,
+            'audio': audio_file,
+            'video_count': video_count,
+            'segment_count': segment_count,
+            'has_segments': segments_file.exists(),
+            'has_ground_truth': gt_file.exists(),
+        })
     
     return benchmarks
+
+
+def select_benchmark(base_dir: str = './data/benchmarks') -> Optional[Dict]:
+    """
+    Display available benchmarks and let the user select one by number.
+    
+    Returns the selected benchmark dict or None if cancelled.
+    """
+    benchmarks = discover_benchmark_numbers(base_dir)
+    
+    if not benchmarks:
+        print(f"  {Colors.YELLOW}No benchmarks found in {base_dir}/videos/{Colors.END}")
+        print(f"  {Colors.DIM}Expected folder pattern: video_* (e.g., video_1, video_2, ...){Colors.END}")
+        return None
+    
+    print(f"\n{Colors.BOLD}{Colors.YELLOW}  Available Benchmarks{Colors.END}")
+    print(f"  {'─' * 56}")
+    
+    for bm in benchmarks:
+        # Build status indicators
+        vid_status = f"{Colors.GREEN}{bm['video_count']} clips ✓{Colors.END}"
+        seg_status = (f"{Colors.GREEN}{bm['segment_count']} segments ✓{Colors.END}" 
+                      if bm['has_segments'] 
+                      else f"{Colors.RED}segments ✗{Colors.END}")
+        gt_status = (f"{Colors.GREEN}ground truth ✓{Colors.END}" 
+                     if bm['has_ground_truth'] 
+                     else f"{Colors.RED}ground truth ✗{Colors.END}")
+        audio_status = (f"{Colors.GREEN}audio ✓{Colors.END}" 
+                        if bm['audio'] 
+                        else f"{Colors.DIM}audio ✗{Colors.END}")
+        
+        print(f"  {Colors.GREEN}{bm['number']:>3}{Colors.END}. {Colors.BOLD}Benchmark {bm['number']}{Colors.END}")
+        print(f"       {vid_status} | {seg_status} | {gt_status} | {audio_status}")
+    
+    print(f"  {Colors.RED}  0{Colors.END}. {Colors.BOLD}Back / Cancel{Colors.END}")
+    print()
+    
+    # Get user selection
+    valid_numbers = [bm['number'] for bm in benchmarks]
+    while True:
+        try:
+            choice = input(f"{Colors.CYAN}  Select benchmark number: {Colors.END}").strip()
+            if choice == '':
+                continue
+            if choice == '0':
+                return None
+            if choice in valid_numbers:
+                return next(bm for bm in benchmarks if bm['number'] == choice)
+            print(f"  {Colors.RED}Invalid selection. Available: {', '.join(valid_numbers)} (or 0 to cancel){Colors.END}")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return None
+
+
+# Keep old function for backward compatibility
+def discover_benchmarks(base_dir: str = './data/benchmarks') -> List[Dict]:
+    """Auto-discover available benchmarks (legacy compatibility)."""
+    return discover_benchmark_numbers(base_dir)
 
 
 def build_command(config: Dict) -> List[str]:
@@ -239,44 +336,29 @@ def run_command(cmd: List[str], dry_run: bool = False):
 # ─── Main Menu Screens ─────────────────────────────────────────────
 
 def screen_quick_benchmark(config: Dict):
-    """Quick benchmark run with auto-discovered settings."""
+    """Quick benchmark run with simplified benchmark selection."""
     clear_screen()
     print_header()
+    print(f"  {Colors.BOLD}Quick Benchmark{Colors.END}")
+    print(f"  {Colors.DIM}Run a benchmark test with auto-discovered settings{Colors.END}")
     
-    benchmarks = discover_benchmarks()
+    # Select benchmark by number
+    bm = select_benchmark()
+    if bm is None:
+        return
     
-    if not benchmarks:
-        print(f"  {Colors.YELLOW}No benchmarks found in ./data/benchmarks/{Colors.END}")
-        print(f"  {Colors.DIM}Make sure you have segments files in data/benchmarks/segments/{Colors.END}")
+    if not bm['has_segments']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no segments file!{Colors.END}")
         input("\n  Press Enter to continue...")
         return
     
-    options = []
-    for bm in benchmarks:
-        status = []
-        if bm['video_dir']:
-            status.append("videos ✓")
-        else:
-            status.append("videos ✗")
-        if bm['ground_truth']:
-            status.append("ground truth ✓")
-        else:
-            status.append("ground truth ✗")
-        if bm['audio']:
-            status.append("audio ✓")
-        else:
-            status.append("audio ✗")
-        options.append((bm['name'], ', '.join(status)))
-    
-    print_menu("Select Benchmark", options)
-    choice = get_choice(len(options))
-    if choice == 0:
-        return
-    
-    bm = benchmarks[choice - 1]
-    
-    if not bm['video_dir']:
-        bm['video_dir'] = browse_directory("Video directory")
+    print(f"\n  {Colors.GREEN}✓ Selected Benchmark {bm['number']}{Colors.END}")
+    print(f"    Videos:       {bm['video_dir']} ({bm['video_count']} clips)")
+    print(f"    Segments:     {bm['segments']} ({bm['segment_count']} segments)")
+    if bm['ground_truth']:
+        print(f"    Ground truth: {bm['ground_truth']}")
+    if bm['audio']:
+        print(f"    Audio:        {bm['audio']}")
     
     # Select encoder
     print_menu("Select Encoder", [
@@ -304,7 +386,7 @@ def screen_quick_benchmark(config: Dict):
         'allow_reuse': False,
         'encoder': encoder,
         'openclip_model': openclip_model,
-        'no_windowing': get_yes_no("Disable windowing?", default=True),
+        'no_windowing': True,
         'verbose': get_yes_no("Verbose output?", default=True),
     })
     
@@ -319,13 +401,35 @@ def screen_full_pipeline(config: Dict):
     print_header()
     print(f"  {Colors.BOLD}Full Pipeline (Indexing + Matching + Assembly){Colors.END}\n")
     
-    config['video_dir'] = browse_directory("Video directory", config.get('video_dir', './data/benchmarks/videos/video_2'))
-    config['audio'] = browse_file("Audio file (voiceover)", config.get('audio'))
+    # Use benchmark selector or manual path
+    print_menu("Video Source", [
+        ("Select from benchmarks", "Auto-discover benchmark videos"),
+        ("Enter path manually", "Specify a custom video directory"),
+    ], show_back=False)
+    source_choice = get_choice(2, "  Select: ")
+    
+    if source_choice == 1:
+        bm = select_benchmark()
+        if bm is None:
+            return
+        config['video_dir'] = bm['video_dir']
+        if bm['has_segments']:
+            config['segments'] = bm['segments']
+        if bm['ground_truth']:
+            config['ground_truth'] = bm['ground_truth']
+        if bm['audio']:
+            config['audio'] = bm['audio']
+    else:
+        config['video_dir'] = browse_directory("Video directory", config.get('video_dir'))
+    
+    if not config.get('audio'):
+        config['audio'] = browse_file("Audio file (voiceover)", config.get('audio'))
     config['output'] = get_input("Output directory", config.get('output', './output'))
     
-    segments = browse_file("Segments file (optional, skip for auto-segmentation)")
-    if segments:
-        config['segments'] = segments
+    if not config.get('segments'):
+        segments = browse_file("Segments file (optional, skip for auto-segmentation)")
+        if segments:
+            config['segments'] = segments
     
     config['match_only'] = False
     config['allow_reuse'] = not get_yes_no("Prevent clip reuse?", default=True)
@@ -360,22 +464,38 @@ def screen_full_pipeline(config: Dict):
 
 
 def screen_grid_search(config: Dict):
-    """OpenCLIP grid search optimizer."""
+    """OpenCLIP grid search optimizer with simplified benchmark selection."""
     clear_screen()
     print_header()
     print(f"  {Colors.BOLD}OpenCLIP Grid Search Optimizer{Colors.END}")
-    print(f"  {Colors.DIM}Sweep parameters to find optimal OpenCLIP configuration{Colors.END}\n")
+    print(f"  {Colors.DIM}Sweep parameters to find optimal OpenCLIP configuration{Colors.END}")
     
-    # Get required paths
-    config['video_dir'] = browse_directory("Video directory", config.get('video_dir', './data/benchmarks/videos/video_2'))
-    config['segments'] = browse_file("Segments file", config.get('segments'))
-    config['ground_truth'] = browse_file("Ground truth file", config.get('ground_truth'))
-    config['output'] = get_input("Output directory", config.get('output', './output'))
+    # Select benchmark by number
+    bm = select_benchmark()
+    if bm is None:
+        return
     
-    if not config.get('video_dir') or not config.get('segments') or not config.get('ground_truth'):
-        print(f"  {Colors.RED}Video dir, segments, and ground truth are required for grid search{Colors.END}")
+    if not bm['has_segments']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no segments file!{Colors.END}")
         input("\n  Press Enter to continue...")
         return
+    
+    if not bm['has_ground_truth']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no ground truth file!{Colors.END}")
+        print(f"  {Colors.DIM}Ground truth is required for grid search evaluation.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+    
+    config['video_dir'] = bm['video_dir']
+    config['segments'] = bm['segments']
+    config['ground_truth'] = bm['ground_truth']
+    
+    print(f"\n  {Colors.GREEN}✓ Selected Benchmark {bm['number']}{Colors.END}")
+    print(f"    Videos:       {bm['video_dir']} ({bm['video_count']} clips)")
+    print(f"    Segments:     {bm['segments']} ({bm['segment_count']} segments)")
+    print(f"    Ground truth: {bm['ground_truth']}")
+    
+    config['output'] = get_input("Output directory", config.get('output', './output'))
     
     # Parameter selection
     print(f"\n  {Colors.BOLD}Select parameters to sweep:{Colors.END}")
@@ -499,12 +619,17 @@ def screen_cache_management(config: Dict):
         items = list(cache_dir.iterdir())
         if items:
             print(f"  Cache directory: {cache_dir}")
+            total_size = 0
             for item in sorted(items):
                 if item.is_dir():
                     size = sum(f.stat().st_size for f in item.rglob('*') if f.is_file())
+                    total_size += size
                     print(f"    📁 {item.name} ({size / 1024:.1f} KB)")
                 else:
-                    print(f"    📄 {item.name} ({item.stat().st_size / 1024:.1f} KB)")
+                    size = item.stat().st_size
+                    total_size += size
+                    print(f"    📄 {item.name} ({size / 1024:.1f} KB)")
+            print(f"\n  {Colors.DIM}Total cache size: {total_size / 1024 / 1024:.1f} MB{Colors.END}")
         else:
             print(f"  {Colors.DIM}Cache is empty{Colors.END}")
     else:
@@ -513,10 +638,11 @@ def screen_cache_management(config: Dict):
     print_menu("Cache Actions", [
         ("Clear VideoPrism index cache", "Remove cached video_index/"),
         ("Clear OpenCLIP index cache", "Remove cached video_index_openclip/"),
+        ("Clear grid search cache", "Remove cached grid search indices"),
         ("Clear ALL caches", "Remove entire cache directory"),
     ])
     
-    choice = get_choice(3)
+    choice = get_choice(4)
     if choice == 0:
         return
     
@@ -524,6 +650,21 @@ def screen_cache_management(config: Dict):
         target = cache_dir / 'video_index'
     elif choice == 2:
         target = cache_dir / 'video_index_openclip'
+    elif choice == 3:
+        # Clear all gs_* directories
+        import shutil
+        cleared = 0
+        if cache_dir.exists():
+            for item in cache_dir.iterdir():
+                if item.is_dir() and item.name.startswith('gs_'):
+                    shutil.rmtree(item)
+                    cleared += 1
+        if cleared:
+            print(f"  {Colors.GREEN}✓ Cleared {cleared} grid search cache directories{Colors.END}")
+        else:
+            print(f"  {Colors.DIM}No grid search caches found{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
     else:
         target = cache_dir
     

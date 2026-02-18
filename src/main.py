@@ -679,23 +679,37 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
+  # Simplest: use benchmark number
+  python main.py --benchmark 2 --output ./output --match-only
+
+  # Basic usage with explicit paths
   python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output
   
   # Use manual segments (skip transcription & segmentation)
-  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \
+  python main.py --video-dir ./videos --audio ./voiceover.mp3 --output ./output \\
     --segments ./my_segments.json
 
   # Match-Only Test Mode (Bypass transcription and duration constraints)
-  python main.py --video-dir ./videos --output ./output \
+  python main.py --video-dir ./videos --output ./output \\
     --segments ./my_segments.json --match-only
         """
     )
     
+    # Benchmark selection: either --benchmark or explicit paths
+    parser.add_argument(
+        '--benchmark', '-b',
+        type=str, default=None,
+        help='Benchmark number (e.g., 2). Auto-resolves video-dir, segments, and ground-truth paths.'
+    )
+    parser.add_argument(
+        '--benchmarks-dir',
+        default='./data/benchmarks',
+        help='Base directory for benchmarks (default: ./data/benchmarks)'
+    )
     parser.add_argument(
         '--video-dir',
-        required=True,
-        help='Directory containing B-roll video clips'
+        default=None,
+        help='Directory containing B-roll video clips (overrides --benchmark)'
     )
     parser.add_argument(
         '--audio',
@@ -704,8 +718,8 @@ Examples:
     )
     parser.add_argument(
         '--output',
-        required=True,
-        help='Output directory for the final video'
+        default='./output',
+        help='Output directory for the final video (default: ./output)'
     )
     parser.add_argument(
         '--cache-dir',
@@ -809,7 +823,43 @@ Examples:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
+    # Resolve benchmark paths if --benchmark is provided
+    if args.benchmark:
+        base = Path(args.benchmarks_dir)
+        bm = args.benchmark
+        
+        bm_video_dir = base / 'videos' / f'video_{bm}'
+        bm_segments = base / 'segments' / f'benchmark_{bm}_segments.json'
+        bm_gt = base / 'gdtruth' / f'benchmark_{bm}_ground_truth.json'
+        
+        # Use resolved paths, but allow explicit overrides
+        if args.video_dir is None:
+            args.video_dir = str(bm_video_dir)
+        if args.segments is None and bm_segments.exists():
+            args.segments = str(bm_segments)
+        if args.ground_truth is None and bm_gt.exists():
+            args.ground_truth = str(bm_gt)
+        
+        # Try to find audio
+        audio_dir = base / 'audio'
+        if args.audio is None and audio_dir.exists():
+            for pattern in [f'voiceover_{bm}.mp3', f'benchmark_{bm}.mp3']:
+                candidate = audio_dir / pattern
+                if candidate.exists():
+                    args.audio = str(candidate)
+                    break
+        
+        logger.info(f"Benchmark {bm} resolved:")
+        logger.info(f"  Video dir:    {args.video_dir}")
+        logger.info(f"  Segments:     {args.segments}")
+        logger.info(f"  Ground truth: {args.ground_truth}")
+        if args.audio:
+            logger.info(f"  Audio:        {args.audio}")
+    
     # Validate inputs
+    if not args.video_dir:
+        parser.error("Either --benchmark <number> or --video-dir is required.")
+    
     if not Path(args.video_dir).exists():
         logger.error(f"Video directory not found: {args.video_dir}")
         sys.exit(1)

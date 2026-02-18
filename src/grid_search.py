@@ -207,9 +207,15 @@ class OpenCLIPGridSearch:
         return configs
     
     def _get_cache_dir(self, config: GridSearchConfig) -> str:
-        """Get a unique cache directory for a configuration."""
+        """Get a unique cache directory for a configuration.
+        
+        Includes a hash of the video directory path so that different
+        benchmarks get separate caches and stale indices are never loaded.
+        """
+        import hashlib
+        video_hash = hashlib.md5(self.video_dir.encode()).hexdigest()[:8]
         cache_name = (
-            f"gs_{config.model_name}_{config.num_frames}f_{config.aggregation}"
+            f"gs_{video_hash}_{config.model_name}_{config.num_frames}f_{config.aggregation}"
         )
         return str(self.cache_base_dir / cache_name)
     
@@ -549,6 +555,51 @@ class _LLMEnsembleMatcher(OpenCLIPTextMatcher):
         return avg_embedding.astype(np.float32)
 
 
+def _resolve_benchmark_paths(benchmark_num: str, base_dir: str = './data/benchmarks') -> dict:
+    """
+    Resolve all benchmark paths from a benchmark number.
+    
+    Given a benchmark number (e.g., '2'), resolves:
+      - video_dir:    data/benchmarks/videos/video_2/
+      - segments:     data/benchmarks/segments/benchmark_2_segments.json
+      - ground_truth: data/benchmarks/gdtruth/benchmark_2_ground_truth.json
+    
+    Args:
+        benchmark_num: The benchmark number as a string (e.g., '2', '10')
+        base_dir: Base directory for benchmarks
+        
+    Returns:
+        Dict with resolved paths
+        
+    Raises:
+        FileNotFoundError if any required file is missing
+    """
+    base = Path(base_dir)
+    
+    video_dir = base / 'videos' / f'video_{benchmark_num}'
+    segments_file = base / 'segments' / f'benchmark_{benchmark_num}_segments.json'
+    gt_file = base / 'gdtruth' / f'benchmark_{benchmark_num}_ground_truth.json'
+    
+    errors = []
+    if not video_dir.exists():
+        errors.append(f"Video directory not found: {video_dir}")
+    if not segments_file.exists():
+        errors.append(f"Segments file not found: {segments_file}")
+    if not gt_file.exists():
+        errors.append(f"Ground truth file not found: {gt_file}")
+    
+    if errors:
+        raise FileNotFoundError(
+            f"Benchmark {benchmark_num} is incomplete:\n  " + "\n  ".join(errors)
+        )
+    
+    return {
+        'video_dir': str(video_dir),
+        'segments': str(segments_file),
+        'ground_truth': str(gt_file),
+    }
+
+
 def main():
     """CLI entry point for grid search."""
     import argparse
@@ -558,40 +609,37 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full grid search (all combinations)
+  # Grid search using benchmark number (simplest)
+  python src/grid_search.py --benchmark 2
+
+  # Quick search on benchmark 3
+  python src/grid_search.py --benchmark 3 --quick
+
+  # Full grid search with explicit paths
   python src/grid_search.py \\
     --video-dir data/benchmarks/videos/video_2/ \\
     --segments data/benchmarks/segments/benchmark_2_segments.json \\
     --ground-truth data/benchmarks/gdtruth/benchmark_2_ground_truth.json
 
-  # Quick search (reduced grid)
-  python src/grid_search.py \\
-    --video-dir data/benchmarks/videos/video_2/ \\
-    --segments data/benchmarks/segments/benchmark_2_segments.json \\
-    --ground-truth data/benchmarks/gdtruth/benchmark_2_ground_truth.json \\
-    --quick
-
   # With LLM ensemble prompts
-  python src/grid_search.py \\
-    --video-dir data/benchmarks/videos/video_2/ \\
-    --segments data/benchmarks/segments/benchmark_2_segments.json \\
-    --ground-truth data/benchmarks/gdtruth/benchmark_2_ground_truth.json \\
-    --llm-model llama3.2:3b
+  python src/grid_search.py --benchmark 2 --llm-model llama3.2:3b
 
   # Custom parameter grid
-  python src/grid_search.py \\
-    --video-dir data/benchmarks/videos/video_2/ \\
-    --segments data/benchmarks/segments/benchmark_2_segments.json \\
-    --ground-truth data/benchmarks/gdtruth/benchmark_2_ground_truth.json \\
+  python src/grid_search.py --benchmark 2 \\
     --models ViT-B-32 ViT-L-14 \\
     --frames 8 16 \\
     --aggregations mean best_frame
         """
     )
     
-    parser.add_argument('--video-dir', required=True, help='Directory containing video files')
-    parser.add_argument('--segments', required=True, help='Path to segments JSON file')
-    parser.add_argument('--ground-truth', required=True, help='Path to ground truth JSON file')
+    # Benchmark selection: either --benchmark or explicit paths
+    parser.add_argument('--benchmark', '-b', type=str, default=None,
+                       help='Benchmark number (e.g., 2). Auto-resolves video-dir, segments, and ground-truth paths.')
+    parser.add_argument('--benchmarks-dir', default='./data/benchmarks',
+                       help='Base directory for benchmarks (default: ./data/benchmarks)')
+    parser.add_argument('--video-dir', default=None, help='Directory containing video files (overrides --benchmark)')
+    parser.add_argument('--segments', default=None, help='Path to segments JSON file (overrides --benchmark)')
+    parser.add_argument('--ground-truth', default=None, help='Path to ground truth JSON file (overrides --benchmark)')
     parser.add_argument('--output', default='./output/grid_search', help='Output directory')
     parser.add_argument('--cache-dir', default='./cache', help='Cache directory')
     parser.add_argument('--device', default='cuda:0', help='GPU device')
@@ -621,6 +669,32 @@ Examples:
     
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Resolve benchmark paths if --benchmark is provided
+    if args.benchmark:
+        try:
+            bm_paths = _resolve_benchmark_paths(args.benchmark, args.benchmarks_dir)
+            # Use resolved paths, but allow explicit overrides
+            if args.video_dir is None:
+                args.video_dir = bm_paths['video_dir']
+            if args.segments is None:
+                args.segments = bm_paths['segments']
+            if args.ground_truth is None:
+                args.ground_truth = bm_paths['ground_truth']
+            logger.info(f"Benchmark {args.benchmark} resolved:")
+            logger.info(f"  Video dir:    {args.video_dir}")
+            logger.info(f"  Segments:     {args.segments}")
+            logger.info(f"  Ground truth: {args.ground_truth}")
+        except FileNotFoundError as e:
+            logger.error(str(e))
+            sys.exit(1)
+    
+    # Validate that required paths are set
+    if not args.video_dir or not args.segments or not args.ground_truth:
+        parser.error(
+            "Either --benchmark <number> or all of --video-dir, --segments, "
+            "and --ground-truth are required."
+        )
     
     # Run grid search
     searcher = OpenCLIPGridSearch(
