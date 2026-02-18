@@ -8,11 +8,16 @@ match them against text queries using cosine similarity.
 Key differences from VideoPrism:
 - Frame-level encoding: Each frame is encoded independently as an image
 - No temporal understanding: CLIP does not model motion or temporal transitions
-- Average pooling: Multiple frame embeddings are averaged into a single vector
+- Configurable aggregation: mean, max, or best-frame pooling
+- Prompt engineering: Configurable prompt templates and ensemble averaging
 - Shared text-image space: Uses CLIP's contrastive text-image embedding space
 
-This serves as a "naive" baseline to measure how much VideoPrism's temporal
-video understanding improves matching quality over simple frame-level analysis.
+Tunable parameters for grid search optimization:
+- model_name: ViT-B-32, ViT-B-16, ViT-L-14
+- num_frames: Number of frames to sample per video (4, 8, 16, 32)
+- aggregation: How to combine frame embeddings (mean, max, best_frame)
+- prompt_template: Text template for queries (None, "a video of {}", etc.)
+- ensemble_prompts: List of multiple prompts to average for each query
 """
 
 import os
@@ -48,14 +53,38 @@ logging.basicConfig(level=logging.INFO)
 from models import VideoMetadata
 
 
+# ─── Built-in Prompt Templates ──────────────────────────────────────
+
+PROMPT_TEMPLATES = {
+    'none': '{text}',
+    'video': 'a video of {text}',
+    'photo': 'a photo of {text}',
+    'scene': 'a scene showing {text}',
+    'action': 'a person {text}',
+    'cooking': 'a cooking video showing {text}',
+    'clip': 'a short video clip of {text}',
+}
+
+# Default ensemble templates (used when ensemble is enabled without LLM)
+DEFAULT_ENSEMBLE_TEMPLATES = [
+    '{text}',
+    'a video of {text}',
+    'a photo of {text}',
+    'a scene showing {text}',
+    'a short clip of {text}',
+]
+
+
 class OpenCLIPVideoIndexer:
     """
-    OpenCLIP-based video indexing system (baseline).
+    OpenCLIP-based video indexing system (baseline) with tunable parameters.
     
     Encodes videos by sampling frames, encoding each with CLIP's image encoder,
-    and averaging the frame embeddings into a single video representation.
+    and combining frame embeddings using a configurable aggregation strategy.
     
-    This provides a frame-level baseline without temporal understanding.
+    Tunable parameters:
+    - num_frames: Number of frames to sample (default: 16)
+    - aggregation: 'mean', 'max', or 'best_frame' (default: 'mean')
     """
     
     # Available models (name -> pretrained weights)
@@ -69,7 +98,9 @@ class OpenCLIPVideoIndexer:
         self,
         model_name: str = 'ViT-B-32',
         index_dir: str = './video_index_openclip',
-        device: str = 'cuda:0'
+        device: str = 'cuda:0',
+        num_frames: int = 16,
+        aggregation: str = 'mean'
     ):
         """
         Initialize the OpenCLIP Video Indexer.
@@ -78,6 +109,8 @@ class OpenCLIPVideoIndexer:
             model_name: OpenCLIP model name (ViT-B-32, ViT-B-16, or ViT-L-14)
             index_dir: Directory to store the FAISS index and metadata
             device: Device to use ('cuda:0', 'cpu', etc.)
+            num_frames: Number of frames to sample per video/window
+            aggregation: Frame aggregation method ('mean', 'max', or 'best_frame')
         """
         if open_clip is None:
             raise ImportError(
@@ -91,6 +124,8 @@ class OpenCLIPVideoIndexer:
         self.model_name = model_name
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
+        self.num_frames = num_frames
+        self.aggregation = aggregation
         
         # Determine torch device
         if 'cuda' in device and torch.cuda.is_available():
@@ -103,6 +138,7 @@ class OpenCLIPVideoIndexer:
         # Load OpenCLIP model
         pretrained = self.MODELS.get(model_name, 'laion2b_s34b_b79k')
         logger.info(f"Loading OpenCLIP model: {model_name} (pretrained: {pretrained})")
+        logger.info(f"  num_frames={num_frames}, aggregation={aggregation}")
         
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained
@@ -117,12 +153,15 @@ class OpenCLIPVideoIndexer:
         self.metadata_list: List[VideoMetadata] = []
         self.video_id_to_idx: Dict[str, int] = {}
         
+        # Store per-frame embeddings for best_frame aggregation at query time
+        self._frame_embeddings: Dict[str, np.ndarray] = {}
+        
         logger.info(f"OpenCLIPVideoIndexer initialized on {self.device}")
     
     def extract_frames(
         self,
         video_path: str,
-        num_frames: int = 16,
+        num_frames: int = None,
         start_time: float = 0.0,
         end_time: float = -1.0
     ) -> Tuple[List, Dict]:
@@ -131,13 +170,16 @@ class OpenCLIPVideoIndexer:
         
         Args:
             video_path: Path to the video file
-            num_frames: Number of frames to sample
+            num_frames: Number of frames to sample (uses self.num_frames if None)
             start_time: Start time for windowed extraction
             end_time: End time for windowed extraction (-1 = full video)
             
         Returns:
             Tuple of (list of PIL Images, video info dict)
         """
+        if num_frames is None:
+            num_frames = self.num_frames
+        
         cap = cv2.VideoCapture(video_path)
         
         if not cap.isOpened():
@@ -172,7 +214,6 @@ class OpenCLIPVideoIndexer:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if ret:
-                # Convert BGR to RGB and then to PIL Image
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_image = Image.fromarray(frame_rgb)
                 frames.append(pil_image)
@@ -194,50 +235,88 @@ class OpenCLIPVideoIndexer:
         
         return frames, video_info
     
-    def get_video_embedding(
+    def get_frame_embeddings(
         self,
         video_path: str,
-        num_frames: int = 16,
+        num_frames: int = None,
         start_time: float = 0.0,
         end_time: float = -1.0
     ) -> Tuple[np.ndarray, Dict]:
         """
-        Extract embedding for a video by averaging CLIP frame embeddings.
+        Extract per-frame CLIP embeddings (normalized).
         
-        This is the key difference from VideoPrism: each frame is encoded
-        independently and then averaged. No temporal modeling is performed.
-        
-        Args:
-            video_path: Path to the video file
-            num_frames: Number of frames to sample and average
-            start_time: Start time for windowed extraction
-            end_time: End time for windowed extraction (-1 = full video)
-            
         Returns:
-            Tuple of (embedding array, video info dict)
+            Tuple of (frame_embeddings [N x D], video_info dict)
         """
         frames, video_info = self.extract_frames(
             video_path, num_frames=num_frames,
             start_time=start_time, end_time=end_time
         )
         
-        # Preprocess all frames for CLIP
         preprocessed = torch.stack([self.preprocess(f) for f in frames]).to(self.device)
         
-        # Encode all frames
         with torch.no_grad():
             frame_features = self.model.encode_image(preprocessed)
-            # Normalize each frame embedding
             frame_features = frame_features / frame_features.norm(dim=-1, keepdim=True)
         
-        # Average pool all frame embeddings
-        video_embedding = frame_features.mean(dim=0)
-        # Re-normalize the averaged embedding
-        video_embedding = video_embedding / video_embedding.norm()
+        return frame_features.float().cpu().numpy().astype(np.float32), video_info
+    
+    def get_video_embedding(
+        self,
+        video_path: str,
+        num_frames: int = None,
+        start_time: float = 0.0,
+        end_time: float = -1.0,
+        aggregation: str = None,
+        store_frames: bool = False,
+        video_id: str = None
+    ) -> Tuple[np.ndarray, Dict]:
+        """
+        Extract embedding for a video using configurable aggregation.
         
-        embedding = video_embedding.float().cpu().numpy().astype(np.float32)
+        Args:
+            video_path: Path to the video file
+            num_frames: Number of frames to sample (uses self.num_frames if None)
+            start_time: Start time for windowed extraction
+            end_time: End time for windowed extraction (-1 = full video)
+            aggregation: Override aggregation method (uses self.aggregation if None)
+            store_frames: If True, store per-frame embeddings for later best_frame matching
+            video_id: Video ID for storing frame embeddings
+            
+        Returns:
+            Tuple of (embedding array [D], video info dict)
+        """
+        if aggregation is None:
+            aggregation = self.aggregation
         
-        return embedding, video_info
+        frame_embeddings, video_info = self.get_frame_embeddings(
+            video_path, num_frames=num_frames,
+            start_time=start_time, end_time=end_time
+        )
+        
+        # Store per-frame embeddings if needed for best_frame matching
+        if store_frames and video_id:
+            self._frame_embeddings[video_id] = frame_embeddings
+        
+        if aggregation == 'mean':
+            # Average pool all frame embeddings
+            video_embedding = frame_embeddings.mean(axis=0)
+        elif aggregation == 'max':
+            # Max pool across frames (take max per dimension)
+            video_embedding = frame_embeddings.max(axis=0)
+        elif aggregation == 'best_frame':
+            # For indexing, use mean as the representative embedding
+            # The actual best-frame selection happens at query time
+            video_embedding = frame_embeddings.mean(axis=0)
+        else:
+            raise ValueError(f"Unknown aggregation method: {aggregation}")
+        
+        # Normalize
+        norm = np.linalg.norm(video_embedding)
+        if norm > 0:
+            video_embedding = video_embedding / norm
+        
+        return video_embedding.astype(np.float32), video_info
     
     def _compute_windows(
         self,
@@ -245,7 +324,7 @@ class OpenCLIPVideoIndexer:
         window_size: float = 5.0,
         window_overlap: float = 0.5
     ) -> List[Tuple[float, float]]:
-        """Compute temporal sliding windows (same logic as VideoPrism indexer)."""
+        """Compute temporal sliding windows."""
         if duration <= window_size:
             return [(0.0, duration)]
         
@@ -298,13 +377,15 @@ class OpenCLIPVideoIndexer:
             return 0
         
         logger.info(f"Found {len(video_files)} video files to index with OpenCLIP")
+        logger.info(f"  Model: {self.model_name}, Frames: {self.num_frames}, Aggregation: {self.aggregation}")
         if use_windowing:
-            logger.info(f"Temporal windowing enabled: window_size={window_size}s, overlap={window_overlap}")
+            logger.info(f"  Temporal windowing: window_size={window_size}s, overlap={window_overlap}")
         else:
-            logger.info("Temporal windowing disabled: indexing full videos only")
+            logger.info("  Temporal windowing: disabled")
         
         embeddings_list = []
         feature_dim = None
+        store_frames = (self.aggregation == 'best_frame')
         
         for video_file in tqdm(video_files, desc="Indexing videos (OpenCLIP)"):
             try:
@@ -332,7 +413,8 @@ class OpenCLIPVideoIndexer:
                             continue
                         
                         embedding, video_info = self.get_video_embedding(
-                            str(video_file), start_time=w_start, end_time=w_end
+                            str(video_file), start_time=w_start, end_time=w_end,
+                            store_frames=store_frames, video_id=video_id
                         )
                         
                         metadata = VideoMetadata(
@@ -356,8 +438,6 @@ class OpenCLIPVideoIndexer:
                         
                         if feature_dim is None:
                             feature_dim = embedding.shape[0]
-                        
-                        logger.debug(f"Indexed {video_id}: window [{w_start:.1f}s-{w_end:.1f}s]")
                     
                     logger.info(f"Indexed {base_video_id}: {len(windows)} window(s)")
                 
@@ -367,7 +447,10 @@ class OpenCLIPVideoIndexer:
                     if video_id in self.video_id_to_idx:
                         continue
                     
-                    embedding, video_info = self.get_video_embedding(str(video_file))
+                    embedding, video_info = self.get_video_embedding(
+                        str(video_file),
+                        store_frames=store_frames, video_id=video_id
+                    )
                     
                     metadata = VideoMetadata(
                         video_id=video_id,
@@ -391,7 +474,7 @@ class OpenCLIPVideoIndexer:
                     if feature_dim is None:
                         feature_dim = embedding.shape[0]
                     
-                    logger.info(f"Indexed {video_id}: embedding dim {embedding.shape[0]}")
+                    logger.info(f"Indexed {video_id}: dim={embedding.shape[0]}")
             
             except Exception as e:
                 logger.error(f"Error indexing {video_file}: {e}")
@@ -437,6 +520,43 @@ class OpenCLIPVideoIndexer:
         
         return results
     
+    def search_best_frame(
+        self,
+        query_embedding: np.ndarray,
+        video_id: str
+    ) -> float:
+        """
+        Find the best-matching frame for a query within a specific video.
+        
+        Used when aggregation='best_frame'. Instead of comparing against the
+        mean embedding, compares the query against each individual frame and
+        returns the maximum similarity.
+        
+        Args:
+            query_embedding: Text query embedding [D]
+            video_id: Video ID to search within
+            
+        Returns:
+            Maximum frame-level similarity score
+        """
+        if video_id not in self._frame_embeddings:
+            # Fall back to FAISS search
+            results = self.search_by_embedding(query_embedding, k=len(self.metadata_list))
+            for vid_id, sim, _ in results:
+                if vid_id == video_id:
+                    return sim
+            return -1.0
+        
+        frame_embs = self._frame_embeddings[video_id]  # [N, D]
+        query = query_embedding.reshape(1, -1)
+        query_norm = np.linalg.norm(query)
+        if query_norm > 0:
+            query = query / query_norm
+        
+        # Cosine similarity with each frame
+        similarities = (frame_embs @ query.T).flatten()
+        return float(similarities.max())
+    
     def save_index(self):
         """Save the FAISS index and metadata to disk."""
         if self.index is None:
@@ -452,8 +572,18 @@ class OpenCLIPVideoIndexer:
             json.dump({
                 'metadata': metadata_dicts,
                 'video_id_to_idx': self.video_id_to_idx,
-                'model_name': f'openclip_{self.model_name}'
+                'model_name': f'openclip_{self.model_name}',
+                'num_frames': self.num_frames,
+                'aggregation': self.aggregation
             }, f, indent=2)
+        
+        # Save frame embeddings if using best_frame
+        if self._frame_embeddings:
+            frame_emb_path = self.index_dir / 'frame_embeddings.npz'
+            np.savez_compressed(
+                str(frame_emb_path),
+                **{k: v for k, v in self._frame_embeddings.items()}
+            )
         
         logger.info(f"Saved OpenCLIP index to {self.index_dir}")
     
@@ -479,6 +609,12 @@ class OpenCLIPVideoIndexer:
         self.metadata_list = [VideoMetadata(**m) for m in data['metadata']]
         self.video_id_to_idx = data['video_id_to_idx']
         
+        # Load frame embeddings if available
+        frame_emb_path = self.index_dir / 'frame_embeddings.npz'
+        if frame_emb_path.exists():
+            loaded = np.load(str(frame_emb_path))
+            self._frame_embeddings = {k: loaded[k] for k in loaded.files}
+        
         logger.info(f"Loaded OpenCLIP index: {len(self.metadata_list)} entries")
         return True
 
@@ -487,15 +623,18 @@ class OpenCLIPTextMatcher:
     """
     Matches script segments to video clips using OpenCLIP text-image similarity.
     
-    This is the baseline counterpart to VideoTextMatcher. It uses CLIP's text
-    encoder to create text embeddings and matches them against the averaged
-    frame embeddings from OpenCLIPVideoIndexer.
+    Supports tunable parameters:
+    - prompt_template: Template for text queries (e.g., "a video of {text}")
+    - ensemble_prompts: Multiple prompts to average for each query
+    - aggregation: Inherited from indexer, affects best_frame matching
     """
     
     def __init__(
         self,
         video_indexer: OpenCLIPVideoIndexer,
-        min_similarity_threshold: float = 0.0
+        min_similarity_threshold: float = 0.0,
+        prompt_template: str = None,
+        ensemble_prompts: List[str] = None
     ):
         """
         Initialize the OpenCLIP text matcher.
@@ -503,6 +642,8 @@ class OpenCLIPTextMatcher:
         Args:
             video_indexer: OpenCLIPVideoIndexer instance with indexed videos
             min_similarity_threshold: Minimum similarity to consider a match
+            prompt_template: Template string with {text} placeholder
+            ensemble_prompts: List of template strings to average
         """
         self.video_indexer = video_indexer
         self.min_similarity_threshold = min_similarity_threshold
@@ -512,12 +653,33 @@ class OpenCLIPTextMatcher:
         self.model = video_indexer.model
         self.tokenizer = video_indexer.tokenizer
         self.device = video_indexer.device
+        self.aggregation = video_indexer.aggregation
         
-        logger.info("OpenCLIPTextMatcher initialized")
+        # Prompt configuration
+        self.prompt_template = prompt_template
+        self.ensemble_prompts = ensemble_prompts
+        
+        if ensemble_prompts:
+            logger.info(f"OpenCLIPTextMatcher: ensemble mode with {len(ensemble_prompts)} prompts")
+        elif prompt_template:
+            logger.info(f"OpenCLIPTextMatcher: prompt template = '{prompt_template}'")
+        else:
+            logger.info("OpenCLIPTextMatcher: no prompt template (raw text)")
+    
+    def _apply_prompt_template(self, text: str, template: str = None) -> str:
+        """Apply a prompt template to the text."""
+        if template is None:
+            template = self.prompt_template
+        if template is None:
+            return text
+        return template.replace('{text}', text)
     
     def get_text_embedding(self, text: str) -> np.ndarray:
         """
         Get embedding for a text query using CLIP's text encoder.
+        
+        If ensemble_prompts is set, generates embeddings for all prompt
+        variations and returns their average.
         
         Args:
             text: Text query string
@@ -525,6 +687,25 @@ class OpenCLIPTextMatcher:
         Returns:
             Normalized embedding array
         """
+        if self.ensemble_prompts:
+            # Ensemble: encode all prompt variations and average
+            all_embeddings = []
+            for template in self.ensemble_prompts:
+                prompted_text = self._apply_prompt_template(text, template)
+                emb = self._encode_single_text(prompted_text)
+                all_embeddings.append(emb)
+            
+            avg_embedding = np.mean(all_embeddings, axis=0)
+            norm = np.linalg.norm(avg_embedding)
+            if norm > 0:
+                avg_embedding = avg_embedding / norm
+            return avg_embedding.astype(np.float32)
+        else:
+            prompted_text = self._apply_prompt_template(text)
+            return self._encode_single_text(prompted_text)
+    
+    def _encode_single_text(self, text: str) -> np.ndarray:
+        """Encode a single text string to a normalized embedding."""
         tokens = self.tokenizer([text]).to(self.device)
         
         with torch.no_grad():
@@ -549,8 +730,8 @@ class OpenCLIPTextMatcher:
         """
         Compute the full similarity matrix between all segments and all videos.
         
-        Uses the same interface as VideoTextMatcher for compatibility with
-        the Hungarian Algorithm and benchmark evaluation.
+        For best_frame aggregation, uses per-frame similarity instead of
+        mean-embedding similarity.
         """
         all_metadata = self.get_all_video_metadata()
         num_segments = len(script_segments)
@@ -569,32 +750,49 @@ class OpenCLIPTextMatcher:
             text_embeddings.append(emb)
         text_embeddings = np.array(text_embeddings)
         
-        # Build similarity matrix via FAISS search
+        # Build similarity matrix
         similarity_matrix = np.zeros((num_segments, num_videos))
         
         for seg_idx, segment in enumerate(script_segments):
-            results = self.video_indexer.search_by_embedding(
-                text_embeddings[seg_idx], k=num_videos
-            )
-            
-            video_sim_map = {video_id: sim for video_id, sim, _ in results}
-            
-            for vid_idx, metadata in enumerate(all_metadata):
-                raw_similarity = video_sim_map.get(metadata.video_id, -1.0)
-                
-                if match_only:
-                    similarity_matrix[seg_idx, vid_idx] = raw_similarity
-                else:
-                    similarity_score = (raw_similarity + 1.0) / 2.0
-                    motion_score = self._calculate_motion_score(metadata, segment['duration'])
-                    context_score = self._calculate_context_score(segment['text'], metadata)
-                    
-                    combined_score = (
-                        0.5 * similarity_score +
-                        0.3 * motion_score +
-                        0.2 * context_score
+            if self.aggregation == 'best_frame':
+                # Best-frame: compare query against each frame individually
+                for vid_idx, metadata in enumerate(all_metadata):
+                    sim = self.video_indexer.search_best_frame(
+                        text_embeddings[seg_idx], metadata.video_id
                     )
-                    similarity_matrix[seg_idx, vid_idx] = combined_score
+                    if match_only:
+                        similarity_matrix[seg_idx, vid_idx] = sim
+                    else:
+                        similarity_score = (sim + 1.0) / 2.0
+                        motion_score = self._calculate_motion_score(metadata, segment['duration'])
+                        context_score = self._calculate_context_score(segment['text'], metadata)
+                        similarity_matrix[seg_idx, vid_idx] = (
+                            0.5 * similarity_score +
+                            0.3 * motion_score +
+                            0.2 * context_score
+                        )
+            else:
+                # Mean or Max aggregation: use FAISS search
+                results = self.video_indexer.search_by_embedding(
+                    text_embeddings[seg_idx], k=num_videos
+                )
+                
+                video_sim_map = {video_id: sim for video_id, sim, _ in results}
+                
+                for vid_idx, metadata in enumerate(all_metadata):
+                    raw_similarity = video_sim_map.get(metadata.video_id, -1.0)
+                    
+                    if match_only:
+                        similarity_matrix[seg_idx, vid_idx] = raw_similarity
+                    else:
+                        similarity_score = (raw_similarity + 1.0) / 2.0
+                        motion_score = self._calculate_motion_score(metadata, segment['duration'])
+                        context_score = self._calculate_context_score(segment['text'], metadata)
+                        similarity_matrix[seg_idx, vid_idx] = (
+                            0.5 * similarity_score +
+                            0.3 * motion_score +
+                            0.2 * context_score
+                        )
         
         return similarity_matrix, all_metadata
     
@@ -604,7 +802,7 @@ class OpenCLIPTextMatcher:
         segment_duration: float,
         window_start: float = 0.0
     ) -> Tuple[float, float]:
-        """Calculate trim start and end times (same as VideoTextMatcher)."""
+        """Calculate trim start and end times."""
         if segment_duration <= 0:
             return window_start, window_start + video_duration
         if video_duration <= segment_duration:
@@ -662,43 +860,67 @@ class OpenCLIPTextMatcher:
             return []
         
         search_k = num_videos if match_only else min(num_videos, k * 5)
-        results = self.video_indexer.search_by_embedding(text_embedding, k=search_k)
         
-        candidates = []
-        for video_id, similarity, metadata in results:
-            if not allow_reuse and video_id in used_videos:
-                continue
-            
-            similarity_score = (similarity + 1.0) / 2.0
-            
-            if match_only:
-                motion_score = 0.0
-                context_score = 0.0
-                combined_score = similarity
-            else:
-                diversity_multiplier = 1.2 if video_id not in used_videos else 0.8
-                motion_score = self._calculate_motion_score(metadata, segment_duration)
-                context_score = self._calculate_context_score(segment_text, metadata)
-                combined_score = (
-                    0.5 * similarity_score * diversity_multiplier +
-                    0.3 * motion_score +
-                    0.2 * context_score
+        if self.aggregation == 'best_frame':
+            # For best_frame, compute similarity against all videos
+            candidates = []
+            all_metadata = self.get_all_video_metadata()
+            for metadata in all_metadata:
+                if not allow_reuse and metadata.video_id in used_videos:
+                    continue
+                similarity = self.video_indexer.search_best_frame(
+                    text_embedding, metadata.video_id
                 )
-            
-            candidates.append({
-                'video_id': video_id,
-                'file_path': metadata.file_path,
-                'duration': metadata.duration,
-                'similarity': similarity,
-                'similarity_score': similarity_score,
-                'motion_score': motion_score,
-                'context_score': context_score,
-                'combined_score': combined_score,
-                'is_reused': video_id in used_videos
-            })
+                candidates.append(self._build_candidate(
+                    metadata, similarity, segment_text, segment_duration,
+                    used_videos, match_only
+                ))
+        else:
+            results = self.video_indexer.search_by_embedding(text_embedding, k=search_k)
+            candidates = []
+            for video_id, similarity, metadata in results:
+                if not allow_reuse and video_id in used_videos:
+                    continue
+                candidates.append(self._build_candidate(
+                    metadata, similarity, segment_text, segment_duration,
+                    used_videos, match_only
+                ))
         
         candidates.sort(key=lambda x: x['combined_score'], reverse=True)
         return candidates[:k]
+    
+    def _build_candidate(
+        self, metadata, similarity, segment_text, segment_duration,
+        used_videos, match_only
+    ) -> Dict:
+        """Build a candidate dict from metadata and similarity."""
+        similarity_score = (similarity + 1.0) / 2.0
+        
+        if match_only:
+            motion_score = 0.0
+            context_score = 0.0
+            combined_score = similarity
+        else:
+            diversity_multiplier = 1.2 if metadata.video_id not in used_videos else 0.8
+            motion_score = self._calculate_motion_score(metadata, segment_duration)
+            context_score = self._calculate_context_score(segment_text, metadata)
+            combined_score = (
+                0.5 * similarity_score * diversity_multiplier +
+                0.3 * motion_score +
+                0.2 * context_score
+            )
+        
+        return {
+            'video_id': metadata.video_id,
+            'file_path': metadata.file_path,
+            'duration': metadata.duration,
+            'similarity': similarity,
+            'similarity_score': similarity_score,
+            'motion_score': motion_score,
+            'context_score': context_score,
+            'combined_score': combined_score,
+            'is_reused': metadata.video_id in used_videos
+        }
     
     def select_best_clip(
         self,
