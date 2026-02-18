@@ -592,6 +592,105 @@ def screen_grid_search(config: Dict):
     input("\n  Press Enter to continue...")
 
 
+def screen_videoprism_grid_search(config: Dict):
+    """VideoPrism grid search optimizer with simplified benchmark selection."""
+    clear_screen()
+    print_header()
+    print(f"  {Colors.BOLD}VideoPrism Grid Search Optimizer{Colors.END}")
+    print(f"  {Colors.DIM}Sweep parameters to find optimal VideoPrism configuration{Colors.END}")
+    
+    # Select benchmark by number
+    bm = select_benchmark()
+    if bm is None:
+        return
+    
+    if not bm['has_segments']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no segments file!{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+    
+    if not bm['has_ground_truth']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no ground truth file!{Colors.END}")
+        print(f"  {Colors.DIM}Ground truth is required for grid search evaluation.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+    
+    config['video_dir'] = bm['video_dir']
+    config['segments'] = bm['segments']
+    config['ground_truth'] = bm['ground_truth']
+    
+    print(f"\n  {Colors.GREEN}✓ Selected Benchmark {bm['number']}{Colors.END}")
+    print(f"    Videos:       {bm['video_dir']} ({bm['video_count']} clips)")
+    print(f"    Segments:     {bm['segments']} ({bm['segment_count']} segments)")
+    print(f"    Ground truth: {bm['ground_truth']}")
+    
+    config['output'] = get_input("Output directory", config.get('output', './output'))
+    
+    # Parameter selection
+    print(f"\n  {Colors.BOLD}Select parameters to sweep:{Colors.END}")
+    
+    sweep_models = get_yes_no("Sweep both models (base + large)?", default=True)
+    sweep_frames = get_yes_no("Sweep number of frames (8, 16, 32)?", default=True)
+    sweep_prompts = get_yes_no("Sweep prompt templates (none, video, photo, scene, cooking)?", default=True)
+    
+    gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
+    
+    # Build grid search command
+    cmd = ['python', 'src/videoprism_grid_search.py']
+    cmd.extend(['--video-dir', config['video_dir']])
+    cmd.extend(['--segments', config['segments']])
+    cmd.extend(['--ground-truth', config['ground_truth']])
+    cmd.extend(['--output', config['output']])
+    cmd.extend(['--device', gpu_device])
+    cmd.append('--no-windowing')
+    
+    if sweep_models:
+        cmd.extend(['--models', 'videoprism_lvt_public_v1_base', 'videoprism_lvt_public_v1_large'])
+    else:
+        cmd.extend(['--models', 'videoprism_lvt_public_v1_base'])
+    
+    if sweep_frames:
+        cmd.extend(['--frames', '8', '16', '32'])
+    else:
+        cmd.extend(['--frames', '16'])
+    
+    if sweep_prompts:
+        cmd.extend(['--prompt-modes', 'none', 'template:video', 'template:photo', 'template:scene', 'template:cooking'])
+    else:
+        cmd.extend(['--prompt-modes', 'none'])
+    
+    cmd_str = ' \\\n    '.join(cmd)
+    print(f"\n{Colors.BOLD}{Colors.BLUE}  Command:{Colors.END}")
+    print(f"  {Colors.DIM}{cmd_str}{Colors.END}\n")
+    
+    # Calculate total configs
+    n_models = 2 if sweep_models else 1
+    n_frames = 3 if sweep_frames else 1
+    n_prompts = 5 if sweep_prompts else 1
+    total = n_models * n_frames * n_prompts
+    print(f"  {Colors.CYAN}Total configurations to test: {total}{Colors.END}\n")
+    
+    if not get_yes_no("Run VideoPrism grid search?", default=True):
+        return
+    
+    print(f"\n{Colors.BOLD}{'═' * 60}{Colors.END}")
+    print()
+    
+    try:
+        process = subprocess.run(cmd, cwd=str(Path(__file__).parent.parent))
+        print(f"\n{Colors.BOLD}{'═' * 60}{Colors.END}")
+        if process.returncode == 0:
+            print(f"  {Colors.GREEN}✓ VideoPrism grid search completed successfully{Colors.END}")
+        else:
+            print(f"  {Colors.RED}✗ Grid search exited with code {process.returncode}{Colors.END}")
+    except KeyboardInterrupt:
+        print(f"\n  {Colors.YELLOW}⚠ Interrupted by user{Colors.END}")
+    except Exception as e:
+        print(f"  {Colors.RED}Error: {e}{Colors.END}")
+    
+    input("\n  Press Enter to continue...")
+
+
 def screen_settings(config: Dict):
     """Global settings."""
     clear_screen()
@@ -638,11 +737,12 @@ def screen_cache_management(config: Dict):
     print_menu("Cache Actions", [
         ("Clear VideoPrism index cache", "Remove cached video_index/"),
         ("Clear OpenCLIP index cache", "Remove cached video_index_openclip/"),
-        ("Clear grid search cache", "Remove cached grid search indices"),
+        ("Clear OpenCLIP grid search cache", "Remove cached gs_* indices"),
+        ("Clear VideoPrism grid search cache", "Remove cached vp_* indices"),
         ("Clear ALL caches", "Remove entire cache directory"),
     ])
     
-    choice = get_choice(4)
+    choice = get_choice(5)
     if choice == 0:
         return
     
@@ -650,19 +750,21 @@ def screen_cache_management(config: Dict):
         target = cache_dir / 'video_index'
     elif choice == 2:
         target = cache_dir / 'video_index_openclip'
-    elif choice == 3:
-        # Clear all gs_* directories
+    elif choice in (3, 4):
+        # Clear grid search directories by prefix
         import shutil
+        prefix = 'gs_' if choice == 3 else 'vp_'
+        label = 'OpenCLIP' if choice == 3 else 'VideoPrism'
         cleared = 0
         if cache_dir.exists():
             for item in cache_dir.iterdir():
-                if item.is_dir() and item.name.startswith('gs_'):
+                if item.is_dir() and item.name.startswith(prefix):
                     shutil.rmtree(item)
                     cleared += 1
         if cleared:
-            print(f"  {Colors.GREEN}✓ Cleared {cleared} grid search cache directories{Colors.END}")
+            print(f"  {Colors.GREEN}✓ Cleared {cleared} {label} grid search cache directories{Colors.END}")
         else:
-            print(f"  {Colors.DIM}No grid search caches found{Colors.END}")
+            print(f"  {Colors.DIM}No {label} grid search caches found{Colors.END}")
         input("\n  Press Enter to continue...")
         return
     else:
@@ -695,11 +797,12 @@ def main_menu():
             ("Quick Benchmark", "Run a benchmark test with auto-discovered settings"),
             ("Full Pipeline", "Index → Match → Assemble with custom settings"),
             ("OpenCLIP Grid Search", "Find optimal OpenCLIP parameters via automated sweep"),
+            ("VideoPrism Grid Search", "Find optimal VideoPrism parameters via automated sweep"),
             ("Cache Management", "View and clear cached indexes"),
             ("Settings", "Configure GPU, output directory, etc."),
         ])
         
-        choice = get_choice(5)
+        choice = get_choice(6)
         
         if choice == 0:
             print(f"\n  {Colors.DIM}Goodbye!{Colors.END}\n")
@@ -711,8 +814,10 @@ def main_menu():
         elif choice == 3:
             screen_grid_search(config)
         elif choice == 4:
-            screen_cache_management(config)
+            screen_videoprism_grid_search(config)
         elif choice == 5:
+            screen_cache_management(config)
+        elif choice == 6:
             screen_settings(config)
 
 
