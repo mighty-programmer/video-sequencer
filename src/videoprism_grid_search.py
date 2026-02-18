@@ -7,20 +7,23 @@ against a benchmark with ground truth, and reports the best configuration.
 Parameters searched:
 - model_name: videoprism_lvt_public_v1_base, videoprism_lvt_public_v1_large
 - num_frames: 8, 16, 32
-- prompt_mode: none, template:video, template:photo, template:scene, template:cooking
+- prompt_mode: none, template:video, template:photo, template:scene, template:cooking,
+               ensemble:template, ensemble:llm
 
 Note: Unlike OpenCLIP, VideoPrism produces a single global temporal embedding
 from all frames together, so there is no per-frame aggregation parameter.
+
+The ensemble modes work by generating multiple text descriptions for each segment,
+encoding each one separately, and averaging the resulting embeddings. This tests
+whether richer text representations improve matching accuracy.
 
 Usage:
     # Simplest: use benchmark number
     python src/videoprism_grid_search.py --benchmark 2
 
-    # Full grid search with explicit paths
-    python src/videoprism_grid_search.py \\
-        --video-dir data/benchmarks/videos/video_2/ \\
-        --segments data/benchmarks/segments/benchmark_2_segments.json \\
-        --ground-truth data/benchmarks/gdtruth/benchmark_2_ground_truth.json
+    # Full grid search with all prompt modes including LLM ensemble
+    python src/videoprism_grid_search.py --benchmark 3 --no-windowing \\
+        --llm-model llama3.2:3b
 
     # Quick search
     python src/videoprism_grid_search.py --benchmark 2 --quick
@@ -45,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from indexing import VideoIndexer
 from matching import VideoTextMatcher, create_sequence, ClipSelection
 from benchmark import BenchmarkEvaluator, BenchmarkResults
+from prompt_generator import create_ensemble_templates
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
@@ -59,14 +63,25 @@ VIDEOPRISM_PROMPT_TEMPLATES = {
     'cooking': 'a cooking video showing {}',
 }
 
+# Default ensemble templates (used for ensemble:template mode)
+# These are applied to each segment text and the embeddings are averaged
+DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES = [
+    '{}',                          # raw text
+    'a video of {}',
+    'a photo of {}',
+    'a scene showing {}',
+    'a short clip of {}',
+]
+
 
 @dataclass
 class VideoPrismGridSearchConfig:
     """A single parameter configuration to test."""
     model_name: str
     num_frames: int
-    prompt_mode: str  # 'none', 'template:video', 'template:photo', 'template:scene', 'template:cooking'
+    prompt_mode: str  # 'none', 'template:*', 'ensemble:template', 'ensemble:llm'
     prompt_template: Optional[str] = None
+    ensemble_prompts: Optional[List[str]] = None
 
 
 @dataclass
@@ -110,13 +125,101 @@ class _PromptedVideoTextMatcher(VideoTextMatcher):
     
     def get_text_embedding(self, text: str) -> np.ndarray:
         """
-        Get embedding for text, optionally applying a prompt template.
+        Get embedding for text, applying a prompt template first.
         """
         if self.prompt_template:
             prompted_text = self.prompt_template.format(text)
         else:
             prompted_text = text
         return super().get_text_embedding(prompted_text)
+
+
+class _EnsembleVideoTextMatcher(VideoTextMatcher):
+    """
+    VideoTextMatcher that encodes multiple prompt variations and averages embeddings.
+    
+    For ensemble:template mode, applies a fixed set of templates to each segment text.
+    The resulting embeddings are averaged and normalized to produce a single query vector.
+    """
+    
+    def __init__(
+        self,
+        video_indexer,
+        model_name: str = 'videoprism_lvt_public_v1_base',
+        device: str = 'gpu',
+        min_similarity_threshold: float = 0.0,
+        ensemble_templates: Optional[List[str]] = None
+    ):
+        super().__init__(
+            video_indexer=video_indexer,
+            model_name=model_name,
+            device=device,
+            min_similarity_threshold=min_similarity_threshold
+        )
+        self.ensemble_templates = ensemble_templates or DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
+    
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        """
+        Get averaged embedding from multiple prompt variations.
+        """
+        all_embeddings = []
+        for template in self.ensemble_templates:
+            prompted_text = template.format(text)
+            emb = super().get_text_embedding(prompted_text)
+            all_embeddings.append(emb)
+        
+        avg_embedding = np.mean(all_embeddings, axis=0)
+        norm = np.linalg.norm(avg_embedding)
+        if norm > 0:
+            avg_embedding = avg_embedding / norm
+        return avg_embedding.astype(np.float32)
+
+
+class _LLMEnsembleVideoTextMatcher(VideoTextMatcher):
+    """
+    VideoTextMatcher that uses per-segment LLM-generated prompt variations.
+    
+    Instead of using the same templates for all segments, this uses unique
+    LLM-generated descriptions per segment text. The LLM produces diverse
+    paraphrases and visual descriptions that are encoded and averaged.
+    """
+    
+    def __init__(
+        self,
+        video_indexer,
+        model_name: str = 'videoprism_lvt_public_v1_base',
+        device: str = 'gpu',
+        min_similarity_threshold: float = 0.0,
+        llm_prompts: Optional[Dict[str, List[str]]] = None
+    ):
+        super().__init__(
+            video_indexer=video_indexer,
+            model_name=model_name,
+            device=device,
+            min_similarity_threshold=min_similarity_threshold
+        )
+        self.llm_prompts = llm_prompts or {}
+    
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        """
+        Get averaged embedding using LLM-generated prompts specific to this text.
+        Falls back to raw text if no LLM prompts are available.
+        """
+        prompts = self.llm_prompts.get(text, [text])
+        
+        if len(prompts) <= 1:
+            return super().get_text_embedding(text)
+        
+        all_embeddings = []
+        for prompt in prompts:
+            emb = super().get_text_embedding(prompt)
+            all_embeddings.append(emb)
+        
+        avg_embedding = np.mean(all_embeddings, axis=0)
+        norm = np.linalg.norm(avg_embedding)
+        if norm > 0:
+            avg_embedding = avg_embedding / norm
+        return avg_embedding.astype(np.float32)
 
 
 class VideoPrismGridSearch:
@@ -196,7 +299,8 @@ class VideoPrismGridSearch:
         self,
         models: List[str] = None,
         num_frames_list: List[int] = None,
-        prompt_modes: List[str] = None
+        prompt_modes: List[str] = None,
+        llm_model: str = None
     ) -> List[VideoPrismGridSearchConfig]:
         """
         Generate all parameter configurations to test.
@@ -205,6 +309,7 @@ class VideoPrismGridSearch:
             models: List of model names to test
             num_frames_list: List of frame counts to test
             prompt_modes: List of prompt modes to test
+            llm_model: Ollama model name for LLM ensemble (None to skip)
             
         Returns:
             List of VideoPrismGridSearchConfig objects
@@ -215,27 +320,37 @@ class VideoPrismGridSearch:
             num_frames_list = [8, 16, 32]
         if prompt_modes is None:
             prompt_modes = ['none', 'template:video', 'template:photo',
-                          'template:scene', 'template:cooking']
+                          'template:scene', 'template:cooking',
+                          'ensemble:template']
+            if llm_model:
+                prompt_modes.append('ensemble:llm')
         
         configs = []
         for model, num_frames, prompt_mode in itertools.product(
             models, num_frames_list, prompt_modes
         ):
-            # Resolve prompt template
-            prompt_template = None
-            if prompt_mode.startswith('template:'):
-                template_name = prompt_mode.split(':', 1)[1]
-                prompt_template = VIDEOPRISM_PROMPT_TEMPLATES.get(template_name)
-                if prompt_template is None:
-                    logger.warning(f"Unknown template: {template_name}, skipping")
-                    continue
-            
-            configs.append(VideoPrismGridSearchConfig(
+            config = VideoPrismGridSearchConfig(
                 model_name=model,
                 num_frames=num_frames,
-                prompt_mode=prompt_mode,
-                prompt_template=prompt_template
-            ))
+                prompt_mode=prompt_mode
+            )
+            
+            # Set prompt template or ensemble prompts based on mode
+            if prompt_mode.startswith('template:'):
+                template_name = prompt_mode.split(':', 1)[1]
+                template = VIDEOPRISM_PROMPT_TEMPLATES.get(template_name)
+                if template is None:
+                    logger.warning(f"Unknown template: {template_name}, skipping")
+                    continue
+                config.prompt_template = template
+            elif prompt_mode == 'ensemble:template':
+                config.ensemble_prompts = DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
+            elif prompt_mode == 'ensemble:llm':
+                # Will be populated during run with pre-generated LLM prompts
+                config.prompt_template = None
+                config.ensemble_prompts = None
+            
+            configs.append(config)
         
         logger.info(f"Generated {len(configs)} configurations to test")
         return configs
@@ -256,13 +371,15 @@ class VideoPrismGridSearch:
     
     def _run_single_config(
         self,
-        config: VideoPrismGridSearchConfig
+        config: VideoPrismGridSearchConfig,
+        llm_prompts: Optional[Dict[str, List[str]]] = None
     ) -> Optional[VideoPrismGridSearchResult]:
         """
         Run the pipeline with a single configuration and evaluate.
         
         Args:
             config: VideoPrismGridSearchConfig to test
+            llm_prompts: Pre-generated LLM prompts (for ensemble:llm mode)
             
         Returns:
             VideoPrismGridSearchResult or None if failed
@@ -313,8 +430,27 @@ class VideoPrismGridSearch:
                 logger.info(f"Loaded cached index: {len(indexer.metadata_list)} entries")
             indexing_time = time.time() - t_index_start
             
-            # 2. Create matcher with prompt configuration
-            if config.prompt_template:
+            # 2. Create matcher based on prompt mode
+            if config.prompt_mode == 'ensemble:llm' and llm_prompts:
+                # LLM ensemble: per-segment unique prompts
+                matcher = _LLMEnsembleVideoTextMatcher(
+                    video_indexer=indexer,
+                    model_name=config.model_name,
+                    device=self.device,
+                    min_similarity_threshold=0.0,
+                    llm_prompts=llm_prompts
+                )
+            elif config.prompt_mode == 'ensemble:template':
+                # Template ensemble: same set of templates for all segments
+                matcher = _EnsembleVideoTextMatcher(
+                    video_indexer=indexer,
+                    model_name=config.model_name,
+                    device=self.device,
+                    min_similarity_threshold=0.0,
+                    ensemble_templates=config.ensemble_prompts
+                )
+            elif config.prompt_template:
+                # Single template: wrap text before encoding
                 matcher = _PromptedVideoTextMatcher(
                     video_indexer=indexer,
                     model_name=config.model_name,
@@ -323,6 +459,7 @@ class VideoPrismGridSearch:
                     prompt_template=config.prompt_template
                 )
             else:
+                # No prompt: raw text
                 matcher = VideoTextMatcher(
                     video_indexer=indexer,
                     model_name=config.model_name,
@@ -391,6 +528,7 @@ class VideoPrismGridSearch:
         models: List[str] = None,
         num_frames_list: List[int] = None,
         prompt_modes: List[str] = None,
+        llm_model: str = None,
         quick: bool = False
     ) -> List[VideoPrismGridSearchResult]:
         """
@@ -400,6 +538,7 @@ class VideoPrismGridSearch:
             models: Models to test (default: [base, large])
             num_frames_list: Frame counts to test (default: [8, 16, 32])
             prompt_modes: Prompt modes to test (default: all)
+            llm_model: Ollama model for LLM ensemble (None to skip)
             quick: If True, use a reduced parameter grid for faster testing
             
         Returns:
@@ -417,8 +556,22 @@ class VideoPrismGridSearch:
         configs = self._generate_configs(
             models=models,
             num_frames_list=num_frames_list,
-            prompt_modes=prompt_modes
+            prompt_modes=prompt_modes,
+            llm_model=llm_model
         )
+        
+        # Pre-generate LLM prompts if needed (do this once, not per config)
+        llm_prompts = None
+        if llm_model and any(c.prompt_mode == 'ensemble:llm' for c in configs):
+            logger.info(f"\nPre-generating LLM prompts using {llm_model}...")
+            cache_file = str(self.output_dir / 'llm_prompts_cache.json')
+            llm_prompts = create_ensemble_templates(
+                self.segments,
+                llm_model=llm_model,
+                num_variations=5,
+                cache_file=cache_file
+            )
+            logger.info(f"Generated prompts for {len(llm_prompts)} segments")
         
         # Run each configuration
         total = len(configs)
@@ -430,7 +583,7 @@ class VideoPrismGridSearch:
         
         for i, config in enumerate(configs):
             logger.info(f"\n[{i+1}/{total}] Running configuration...")
-            result = self._run_single_config(config)
+            result = self._run_single_config(config, llm_prompts=llm_prompts)
             if result:
                 self.results.append(result)
         
@@ -582,6 +735,10 @@ Examples:
   # Grid search using benchmark number (simplest)
   python src/videoprism_grid_search.py --benchmark 2
 
+  # Full sweep with LLM ensemble prompts
+  python src/videoprism_grid_search.py --benchmark 3 --no-windowing \\
+    --llm-model llama3.2:3b
+
   # Quick search on benchmark 3
   python src/videoprism_grid_search.py --benchmark 3 --quick
 
@@ -594,7 +751,9 @@ Examples:
   # Custom parameter grid
   python src/videoprism_grid_search.py --benchmark 2 \\
     --models videoprism_lvt_public_v1_base \\
-    --frames 8 16 32
+    --frames 8 16 32 \\
+    --prompt-modes none ensemble:template ensemble:llm \\
+    --llm-model llama3.2:3b
         """
     )
     
@@ -618,7 +777,12 @@ Examples:
     parser.add_argument('--frames', nargs='+', type=int, default=None,
                        help='Frame counts to test')
     parser.add_argument('--prompt-modes', nargs='+', default=None,
-                       help='Prompt modes to test')
+                       help='Prompt modes to test (e.g., none template:video ensemble:template ensemble:llm)')
+    
+    # LLM ensemble
+    parser.add_argument('--llm-model', default=None,
+                       help='Ollama model for LLM ensemble prompts (e.g., llama3.2:3b). '
+                            'Required for ensemble:llm prompt mode.')
     
     # Windowing
     parser.add_argument('--no-windowing', action='store_true', help='Disable windowing')
@@ -675,6 +839,7 @@ Examples:
         models=args.models,
         num_frames_list=args.frames,
         prompt_modes=args.prompt_modes,
+        llm_model=args.llm_model,
         quick=args.quick
     )
     

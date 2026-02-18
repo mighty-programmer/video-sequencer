@@ -632,6 +632,26 @@ def screen_videoprism_grid_search(config: Dict):
     sweep_models = get_yes_no("Sweep both models (base + large)?", default=True)
     sweep_frames = get_yes_no("Sweep number of frames (8, 16, 32)?", default=True)
     sweep_prompts = get_yes_no("Sweep prompt templates (none, video, photo, scene, cooking)?", default=True)
+    use_ensemble = get_yes_no("Include ensemble prompts (template-based + LLM-generated)?", default=True)
+    
+    llm_model = None
+    if use_ensemble:
+        print_menu("LLM for Prompt Generation", [
+            ("Llama 3.2 3B Instruct", "Fast, good quality (via Ollama)"),
+            ("Mistral 7B Instruct", "Higher quality paraphrasing (via Ollama)"),
+            ("Phi-3 Mini 3.8B", "Compact, efficient (via Ollama)"),
+            ("Custom Ollama model", "Specify your own model name"),
+        ], show_back=False)
+        llm_choice = get_choice(4, "  Select LLM: ")
+        llm_models = {
+            1: 'llama3.2:3b',
+            2: 'mistral:7b-instruct',
+            3: 'phi3:mini',
+        }
+        if llm_choice == 4:
+            llm_model = get_input("Ollama model name")
+        else:
+            llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
     
     gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
     
@@ -654,10 +674,20 @@ def screen_videoprism_grid_search(config: Dict):
     else:
         cmd.extend(['--frames', '16'])
     
+    # Build prompt modes list
+    prompt_modes = []
     if sweep_prompts:
-        cmd.extend(['--prompt-modes', 'none', 'template:video', 'template:photo', 'template:scene', 'template:cooking'])
+        prompt_modes.extend(['none', 'template:video', 'template:photo', 'template:scene', 'template:cooking'])
     else:
-        cmd.extend(['--prompt-modes', 'none'])
+        prompt_modes.append('none')
+    
+    if use_ensemble:
+        prompt_modes.append('ensemble:template')
+        if llm_model:
+            prompt_modes.append('ensemble:llm')
+            cmd.extend(['--llm-model', llm_model])
+    
+    cmd.extend(['--prompt-modes'] + prompt_modes)
     
     cmd_str = ' \\\n    '.join(cmd)
     print(f"\n{Colors.BOLD}{Colors.BLUE}  Command:{Colors.END}")
@@ -666,7 +696,7 @@ def screen_videoprism_grid_search(config: Dict):
     # Calculate total configs
     n_models = 2 if sweep_models else 1
     n_frames = 3 if sweep_frames else 1
-    n_prompts = 5 if sweep_prompts else 1
+    n_prompts = len(prompt_modes)
     total = n_models * n_frames * n_prompts
     print(f"  {Colors.CYAN}Total configurations to test: {total}{Colors.END}\n")
     
