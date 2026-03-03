@@ -887,6 +887,288 @@ def screen_wav_grid_search(config: Dict):
     input("\n  Press Enter to continue...")
 
 
+def screen_benchmark_upload(config: Dict):
+    """Upload a benchmark from a local folder."""
+    import shutil
+    import socket
+
+    clear_screen()
+    print_header()
+    print(f"  {Colors.BOLD}Upload Benchmark{Colors.END}")
+    print(f"  {Colors.DIM}Import a local folder containing videos + JSON files{Colors.END}")
+    print(f"  {Colors.DIM}Expected folder structure (flat):{Colors.END}")
+    print(f"  {Colors.DIM}  my_benchmark/{Colors.END}")
+    print(f"  {Colors.DIM}    ├── segments.json{Colors.END}")
+    print(f"  {Colors.DIM}    ├── ground_truth.json{Colors.END}")
+    print(f"  {Colors.DIM}    ├── clip_001.mp4{Colors.END}")
+    print(f"  {Colors.DIM}    ├── clip_002.mp4{Colors.END}")
+    print(f"  {Colors.DIM}    └── ...{Colors.END}")
+
+    base_dir = Path(config.get('benchmarks_dir', './data/benchmarks'))
+
+    # Determine next available benchmark number
+    existing = discover_benchmark_numbers(str(base_dir))
+    existing_nums = [int(bm['number']) for bm in existing] if existing else []
+    next_num = max(existing_nums) + 1 if existing_nums else 1
+
+    if existing:
+        print(f"\n  {Colors.DIM}Existing benchmarks: {', '.join(str(n) for n in sorted(existing_nums))}{Colors.END}")
+    print(f"  {Colors.GREEN}Next available benchmark number: {next_num}{Colors.END}")
+
+    # Let user override the number
+    num_input = get_input("Benchmark number", str(next_num))
+    try:
+        bm_num = int(num_input)
+    except ValueError:
+        print(f"  {Colors.RED}Invalid number{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    if bm_num in existing_nums:
+        if not get_yes_no(f"Benchmark {bm_num} already exists. Overwrite?", default=False):
+            input("\n  Press Enter to continue...")
+            return
+
+    # Get benchmark title
+    bm_title = get_input("Benchmark title/description", f"Benchmark {bm_num}")
+
+    print(f"\n  {Colors.BOLD}How to upload:{Colors.END}")
+    print(f"  {Colors.DIM}Drag and drop your local folder into the terminal below.{Colors.END}")
+    print(f"  {Colors.DIM}(This pastes the full path to the folder on your Mac){Colors.END}")
+
+    local_path = get_input("Local folder path (drag & drop here)").strip()
+
+    # Clean up path: remove trailing spaces, quotes, and escaped spaces
+    local_path = local_path.strip("'\"")
+    # macOS terminal sometimes escapes spaces with backslashes
+    local_path = local_path.replace('\\ ', ' ')
+
+    if not local_path:
+        print(f"  {Colors.RED}No path provided{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    # Create staging directory on the server
+    staging_dir = Path(f'/tmp/benchmark_upload_{bm_num}')
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get server hostname and username for scp command
+    hostname = socket.gethostname()
+    username = os.environ.get('USER', os.environ.get('LOGNAME', 'user'))
+    home_dir = Path.home()
+
+    # Generate scp command for the user
+    print(f"\n  {Colors.BOLD}{Colors.BLUE}Run this command in a NEW local terminal on your Mac:{Colors.END}")
+    print(f"  {Colors.DIM}{'─' * 56}{Colors.END}")
+    scp_target = staging_dir
+    print(f"\n  {Colors.CYAN}scp -r \"{local_path}/\"* {username}@{hostname}:{scp_target}/{Colors.END}")
+    print(f"\n  {Colors.DIM}{'─' * 56}{Colors.END}")
+    print(f"  {Colors.DIM}This will upload all files from your local folder to the server.{Colors.END}")
+    print(f"  {Colors.DIM}After the upload finishes, come back here and press Enter.{Colors.END}")
+
+    input(f"\n  {Colors.YELLOW}Press Enter AFTER the scp upload is complete...{Colors.END}")
+
+    # Check what was uploaded
+    uploaded_files = list(staging_dir.iterdir()) if staging_dir.exists() else []
+    if not uploaded_files:
+        print(f"  {Colors.RED}No files found in staging directory: {staging_dir}{Colors.END}")
+        print(f"  {Colors.DIM}Make sure the scp command completed successfully.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    # Classify uploaded files
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm'}
+    json_files = [f for f in uploaded_files if f.suffix.lower() == '.json']
+    video_files = [f for f in uploaded_files if f.suffix.lower() in video_extensions]
+
+    print(f"\n  {Colors.GREEN}Found {len(video_files)} video files and {len(json_files)} JSON files{Colors.END}")
+
+    if not video_files:
+        print(f"  {Colors.RED}No video files found! Aborting.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    # Identify segments and ground truth JSON files
+    segments_file = None
+    gt_file = None
+
+    for jf in json_files:
+        name_lower = jf.name.lower()
+        if 'segment' in name_lower:
+            segments_file = jf
+        elif 'ground' in name_lower or 'truth' in name_lower or 'gdtruth' in name_lower or 'gt' in name_lower:
+            gt_file = jf
+
+    # If we couldn't auto-detect, ask the user
+    if len(json_files) >= 2 and (segments_file is None or gt_file is None):
+        print(f"\n  {Colors.YELLOW}Could not auto-detect JSON file roles. Please identify them:{Colors.END}")
+        for i, jf in enumerate(json_files, 1):
+            print(f"    {i}. {jf.name}")
+        if segments_file is None:
+            seg_choice = get_choice(len(json_files), "  Which file is the SEGMENTS file? ")
+            if seg_choice > 0:
+                segments_file = json_files[seg_choice - 1]
+        if gt_file is None:
+            gt_choice = get_choice(len(json_files), "  Which file is the GROUND TRUTH file? ")
+            if gt_choice > 0:
+                gt_file = json_files[gt_choice - 1]
+    elif len(json_files) == 1:
+        # Only one JSON — ask what it is
+        print(f"\n  {Colors.YELLOW}Found 1 JSON file: {json_files[0].name}{Colors.END}")
+        print(f"    1. Segments file")
+        print(f"    2. Ground truth file")
+        jtype = get_choice(2, "  What is this file? ")
+        if jtype == 1:
+            segments_file = json_files[0]
+        elif jtype == 2:
+            gt_file = json_files[0]
+
+    # Show summary before organizing
+    print(f"\n  {Colors.BOLD}Benchmark {bm_num} Summary:{Colors.END}")
+    print(f"    Title:        {bm_title}")
+    print(f"    Videos:       {len(video_files)} clips")
+    print(f"    Segments:     {segments_file.name if segments_file else Colors.RED + 'None' + Colors.END}")
+    print(f"    Ground truth: {gt_file.name if gt_file else Colors.RED + 'None' + Colors.END}")
+
+    if not get_yes_no("Proceed with organizing files?", default=True):
+        # Cleanup staging
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        input("\n  Press Enter to continue...")
+        return
+
+    # Create benchmark directory structure
+    video_dir = base_dir / 'videos' / f'video_{bm_num}'
+    segments_dir = base_dir / 'segments'
+    gt_dir = base_dir / 'gdtruth'
+
+    video_dir.mkdir(parents=True, exist_ok=True)
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    gt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Move video files
+    print(f"\n  Moving video files...")
+    for vf in video_files:
+        dest = video_dir / vf.name
+        shutil.move(str(vf), str(dest))
+    print(f"  {Colors.GREEN}✓ Moved {len(video_files)} videos to {video_dir}{Colors.END}")
+
+    # Move segments file
+    if segments_file:
+        dest = segments_dir / f'benchmark_{bm_num}_segments.json'
+        shutil.move(str(segments_file), str(dest))
+        print(f"  {Colors.GREEN}✓ Segments saved as {dest.name}{Colors.END}")
+
+    # Move ground truth file
+    if gt_file:
+        dest = gt_dir / f'benchmark_{bm_num}_ground_truth.json'
+        shutil.move(str(gt_file), str(dest))
+        print(f"  {Colors.GREEN}✓ Ground truth saved as {dest.name}{Colors.END}")
+
+    # Save benchmark metadata
+    meta_dir = base_dir / 'metadata'
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    meta_file = meta_dir / f'benchmark_{bm_num}_meta.json'
+    meta = {
+        'number': bm_num,
+        'title': bm_title,
+        'video_count': len(video_files),
+        'has_segments': segments_file is not None,
+        'has_ground_truth': gt_file is not None,
+        'created': str(Path(sys.argv[0]).parent),
+    }
+    with open(meta_file, 'w') as f:
+        json.dump(meta, f, indent=2)
+
+    # Cleanup staging directory
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+    print(f"\n  {Colors.GREEN}{Colors.BOLD}✓ Benchmark {bm_num} '{bm_title}' created successfully!{Colors.END}")
+    print(f"  {Colors.DIM}You can now run it with: python src/grid_search.py -b {bm_num}{Colors.END}")
+
+    input("\n  Press Enter to continue...")
+
+
+def screen_benchmark_download(config: Dict):
+    """Download/export a benchmark to a single folder."""
+    import shutil
+    import socket
+
+    clear_screen()
+    print_header()
+    print(f"  {Colors.BOLD}Download Benchmark{Colors.END}")
+    print(f"  {Colors.DIM}Package a benchmark into a single folder for download{Colors.END}")
+
+    base_dir = Path(config.get('benchmarks_dir', './data/benchmarks'))
+
+    # Select benchmark
+    bm = select_benchmark(str(base_dir))
+    if bm is None:
+        return
+
+    bm_num = bm['number']
+
+    # Create export directory
+    export_dir = Path(f'/tmp/benchmark_export_{bm_num}')
+    if export_dir.exists():
+        shutil.rmtree(export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n  {Colors.DIM}Packaging benchmark {bm_num}...{Colors.END}")
+
+    # Copy video files
+    video_dir = Path(bm['video_dir'])
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm'}
+    video_count = 0
+    if video_dir.exists():
+        for vf in video_dir.iterdir():
+            if vf.suffix.lower() in video_extensions:
+                shutil.copy2(str(vf), str(export_dir / vf.name))
+                video_count += 1
+    print(f"  {Colors.GREEN}✓ Copied {video_count} video files{Colors.END}")
+
+    # Copy segments file
+    if bm['has_segments'] and bm['segments']:
+        seg_src = Path(bm['segments'])
+        shutil.copy2(str(seg_src), str(export_dir / 'segments.json'))
+        print(f"  {Colors.GREEN}✓ Copied segments.json{Colors.END}")
+
+    # Copy ground truth file
+    if bm['has_ground_truth'] and bm['ground_truth']:
+        gt_src = Path(bm['ground_truth'])
+        shutil.copy2(str(gt_src), str(export_dir / 'ground_truth.json'))
+        print(f"  {Colors.GREEN}✓ Copied ground_truth.json{Colors.END}")
+
+    # Copy metadata if exists
+    meta_file = base_dir / 'metadata' / f'benchmark_{bm_num}_meta.json'
+    if meta_file.exists():
+        shutil.copy2(str(meta_file), str(export_dir / 'metadata.json'))
+        print(f"  {Colors.GREEN}✓ Copied metadata.json{Colors.END}")
+
+    # Count total files and size
+    total_files = list(export_dir.iterdir())
+    total_size = sum(f.stat().st_size for f in total_files if f.is_file())
+
+    print(f"\n  {Colors.BOLD}Export ready:{Colors.END}")
+    print(f"    Location: {export_dir}")
+    print(f"    Files:    {len(total_files)}")
+    print(f"    Size:     {total_size / 1024 / 1024:.1f} MB")
+
+    # Generate scp command for download
+    hostname = socket.gethostname()
+    username = os.environ.get('USER', os.environ.get('LOGNAME', 'user'))
+
+    print(f"\n  {Colors.BOLD}{Colors.BLUE}Run this command in a local terminal on your Mac to download:{Colors.END}")
+    print(f"  {Colors.DIM}{'─' * 56}{Colors.END}")
+    print(f"\n  {Colors.CYAN}scp -r {username}@{hostname}:{export_dir}/ ~/Downloads/benchmark_{bm_num}/{Colors.END}")
+    print(f"\n  {Colors.DIM}{'─' * 56}{Colors.END}")
+    print(f"  {Colors.DIM}This will download the benchmark to ~/Downloads/benchmark_{bm_num}/ on your Mac.{Colors.END}")
+    print(f"  {Colors.DIM}Change the destination path as needed.{Colors.END}")
+
+    print(f"\n  {Colors.DIM}The export folder will remain at {export_dir} until you exit.{Colors.END}")
+
+    input("\n  Press Enter to continue...")
+
+
 def screen_settings(config: Dict):
     """Global settings."""
     clear_screen()
@@ -996,11 +1278,13 @@ def main_menu():
             ("OpenCLIP Grid Search", "Find optimal OpenCLIP parameters via automated sweep"),
             ("VideoPrism Grid Search", "Find optimal VideoPrism parameters via automated sweep"),
             ("Write-A-Video Grid Search", "Two-stage retrieval: keyword filtering + OpenCLIP reranking"),
+            ("Upload Benchmark", "Import a local folder as a new benchmark (via scp)"),
+            ("Download Benchmark", "Export a benchmark to a single folder for download"),
             ("Cache Management", "View and clear cached indexes"),
             ("Settings", "Configure GPU, output directory, etc."),
         ])
         
-        choice = get_choice(7)
+        choice = get_choice(9)
         
         if choice == 0:
             print(f"\n  {Colors.DIM}Goodbye!{Colors.END}\n")
@@ -1016,8 +1300,12 @@ def main_menu():
         elif choice == 5:
             screen_wav_grid_search(config)
         elif choice == 6:
-            screen_cache_management(config)
+            screen_benchmark_upload(config)
         elif choice == 7:
+            screen_benchmark_download(config)
+        elif choice == 8:
+            screen_cache_management(config)
+        elif choice == 9:
             screen_settings(config)
 
 
