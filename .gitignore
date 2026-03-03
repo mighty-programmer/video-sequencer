@@ -142,3 +142,4 @@ temp/
 *.ckpt
 *.safetensors
 models/
+.staging/

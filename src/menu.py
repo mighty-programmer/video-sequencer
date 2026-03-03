@@ -948,8 +948,9 @@ def screen_benchmark_upload(config: Dict):
         input("\n  Press Enter to continue...")
         return
 
-    # Create staging directory on the server
-    staging_dir = Path(f'/tmp/benchmark_upload_{bm_num}')
+    # Create staging directory inside the project (user's accessible directory)
+    project_dir = Path(__file__).parent.parent
+    staging_dir = project_dir / '.staging' / f'benchmark_upload_{bm_num}'
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     # Get server hostname and username for scp command
@@ -1114,8 +1115,9 @@ def screen_benchmark_download(config: Dict):
 
     bm_num = bm['number']
 
-    # Create export directory
-    export_dir = Path(f'/tmp/benchmark_export_{bm_num}')
+    # Create export directory inside the project (user's accessible directory)
+    project_dir = Path(__file__).parent.parent
+    export_dir = project_dir / '.staging' / f'benchmark_export_{bm_num}'
     if export_dir.exists():
         shutil.rmtree(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
