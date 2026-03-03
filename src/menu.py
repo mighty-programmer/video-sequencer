@@ -721,6 +721,172 @@ def screen_videoprism_grid_search(config: Dict):
     input("\n  Press Enter to continue...")
 
 
+def screen_wav_grid_search(config: Dict):
+    """Write-A-Video two-stage grid search optimizer."""
+    clear_screen()
+    print_header()
+    print(f"  {Colors.BOLD}Write-A-Video (Two-Stage) Grid Search Optimizer{Colors.END}")
+    print(f"  {Colors.DIM}Multi-modal keyword indexing + OpenCLIP reranking{Colors.END}")
+    print(f"  {Colors.DIM}Based on Wang et al., 'Write-A-Video', TOG 2019{Colors.END}")
+    
+    # Select benchmark by number
+    bm = select_benchmark()
+    if bm is None:
+        return
+    
+    if not bm['has_segments']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no segments file!{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+    
+    if not bm['has_ground_truth']:
+        print(f"  {Colors.RED}Benchmark {bm['number']} has no ground truth file!{Colors.END}")
+        print(f"  {Colors.DIM}Ground truth is required for grid search evaluation.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+    
+    config['video_dir'] = bm['video_dir']
+    config['segments'] = bm['segments']
+    config['ground_truth'] = bm['ground_truth']
+    
+    print(f"\n  {Colors.GREEN}✓ Selected Benchmark {bm['number']}{Colors.END}")
+    print(f"    Videos:       {bm['video_dir']} ({bm['video_count']} clips)")
+    print(f"    Segments:     {bm['segments']} ({bm['segment_count']} segments)")
+    print(f"    Ground truth: {bm['ground_truth']}")
+    
+    config['output'] = get_input("Output directory", config.get('output', './output'))
+    
+    # Stage 1: Keyword indexing parameters
+    print(f"\n  {Colors.BOLD}Stage 1: Multi-Modal Keyword Indexing{Colors.END}")
+    print(f"  {Colors.DIM}Object detection (YOLOv8) + Face recognition (DeepFace){Colors.END}")
+    
+    enable_objects = get_yes_no("Enable object detection (YOLOv8)?", default=True)
+    enable_faces = get_yes_no("Enable face detection & clustering (DeepFace)?", default=True)
+    
+    print_menu("YOLO Model Size", [
+        ("YOLOv8n (Nano)", "Fastest, good for benchmarking"),
+        ("YOLOv8s (Small)", "Better accuracy, still fast"),
+        ("YOLOv8m (Medium)", "Balanced speed/accuracy"),
+        ("YOLOv8l (Large)", "Best accuracy, slowest"),
+    ], show_back=False)
+    yolo_choice = get_choice(4, "  Select YOLO model: ")
+    yolo_models = {1: 'yolov8n', 2: 'yolov8s', 3: 'yolov8m', 4: 'yolov8l'}
+    yolo_model = yolo_models.get(yolo_choice, 'yolov8n')
+    
+    fps = float(get_input("Frames per second to analyze", "1.0"))
+    
+    # Stage 2: OpenCLIP reranking parameters
+    print(f"\n  {Colors.BOLD}Stage 2: OpenCLIP Reranking Parameters{Colors.END}")
+    
+    sweep_models = get_yes_no("Sweep OpenCLIP models (ViT-B-32, ViT-B-16, ViT-L-14)?", default=True)
+    sweep_frames = get_yes_no("Sweep number of frames (4, 8, 16, 32)?", default=True)
+    sweep_aggregation = get_yes_no("Sweep aggregation methods (mean, max, best_frame)?", default=True)
+    sweep_prompts = get_yes_no("Sweep prompt templates?", default=True)
+    use_ensemble = get_yes_no("Include ensemble prompts (LLM-generated)?", default=True)
+    
+    llm_model = None
+    if use_ensemble:
+        print_menu("LLM for Prompt Generation", [
+            ("Llama 3.2 3B Instruct", "Fast, good quality (via Ollama)"),
+            ("Mistral 7B Instruct", "Higher quality paraphrasing (via Ollama)"),
+            ("Phi-3 Mini 3.8B", "Compact, efficient (via Ollama)"),
+            ("Custom Ollama model", "Specify your own model name"),
+        ], show_back=False)
+        llm_choice = get_choice(4, "  Select LLM: ")
+        llm_models = {
+            1: 'llama3.2:3b',
+            2: 'mistral:7b-instruct',
+            3: 'phi3:mini',
+        }
+        if llm_choice == 4:
+            llm_model = get_input("Ollama model name")
+        else:
+            llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
+    
+    # WAV-specific: candidate pool size and keyword weight
+    print(f"\n  {Colors.BOLD}Two-Stage Specific Parameters{Colors.END}")
+    sweep_pool = get_yes_no("Sweep candidate pool sizes (5, 10, 20)?", default=False)
+    sweep_kw_weight = get_yes_no("Sweep keyword weights (0.0, 0.1, 0.2, 0.3)?", default=False)
+    
+    gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
+    
+    # Build grid search command
+    cmd = ['python', 'src/wav_grid_search.py']
+    cmd.extend(['--video-dir', config['video_dir']])
+    cmd.extend(['--segments', config['segments']])
+    cmd.extend(['--ground-truth', config['ground_truth']])
+    cmd.extend(['--output', config['output']])
+    cmd.extend(['--device', gpu_device])
+    cmd.append('--no-windowing')
+    cmd.extend(['--yolo-model', yolo_model])
+    cmd.extend(['--fps', str(fps)])
+    
+    if not enable_objects:
+        cmd.append('--no-object-detection')
+    if not enable_faces:
+        cmd.append('--no-face-detection')
+    
+    if sweep_models:
+        cmd.extend(['--models', 'ViT-B-32', 'ViT-B-16', 'ViT-L-14'])
+    else:
+        cmd.extend(['--models', 'ViT-B-32'])
+    
+    if sweep_frames:
+        cmd.extend(['--frames', '4', '8', '16', '32'])
+    else:
+        cmd.extend(['--frames', '16'])
+    
+    if sweep_aggregation:
+        cmd.extend(['--aggregations', 'mean', 'max', 'best_frame'])
+    else:
+        cmd.extend(['--aggregations', 'mean'])
+    
+    # Build prompt modes list
+    prompt_modes = []
+    if sweep_prompts:
+        prompt_modes.extend(['none', 'template:video', 'template:photo', 'template:cooking', 'template:scene'])
+    else:
+        prompt_modes.append('none')
+    
+    if use_ensemble:
+        prompt_modes.append('ensemble:template')
+        if llm_model:
+            prompt_modes.append('ensemble:llm')
+            cmd.extend(['--llm-model', llm_model])
+    
+    cmd.extend(['--prompt-modes'] + prompt_modes)
+    
+    if sweep_pool:
+        cmd.extend(['--pool-sizes', '5', '10', '20'])
+    
+    if sweep_kw_weight:
+        cmd.extend(['--keyword-weights', '0.0', '0.1', '0.2', '0.3'])
+    
+    cmd_str = ' \\\n    '.join(cmd)
+    print(f"\n{Colors.BOLD}{Colors.BLUE}  Command:{Colors.END}")
+    print(f"  {Colors.DIM}{cmd_str}{Colors.END}\n")
+    
+    if not get_yes_no("Run Write-A-Video grid search?", default=True):
+        return
+    
+    print(f"\n{Colors.BOLD}{'═' * 60}{Colors.END}")
+    print()
+    
+    try:
+        process = subprocess.run(cmd, cwd=str(Path(__file__).parent.parent))
+        print(f"\n{Colors.BOLD}{'═' * 60}{Colors.END}")
+        if process.returncode == 0:
+            print(f"  {Colors.GREEN}✓ Write-A-Video grid search completed successfully{Colors.END}")
+        else:
+            print(f"  {Colors.RED}✗ Grid search exited with code {process.returncode}{Colors.END}")
+    except KeyboardInterrupt:
+        print(f"\n  {Colors.YELLOW}⚠ Interrupted by user{Colors.END}")
+    except Exception as e:
+        print(f"  {Colors.RED}Error: {e}{Colors.END}")
+    
+    input("\n  Press Enter to continue...")
+
+
 def screen_settings(config: Dict):
     """Global settings."""
     clear_screen()
@@ -769,10 +935,11 @@ def screen_cache_management(config: Dict):
         ("Clear OpenCLIP index cache", "Remove cached video_index_openclip/"),
         ("Clear OpenCLIP grid search cache", "Remove cached gs_* indices"),
         ("Clear VideoPrism grid search cache", "Remove cached vp_* indices"),
+        ("Clear Write-A-Video keyword cache", "Remove cached wav_kw_* indices"),
         ("Clear ALL caches", "Remove entire cache directory"),
     ])
     
-    choice = get_choice(5)
+    choice = get_choice(6)
     if choice == 0:
         return
     
@@ -780,11 +947,11 @@ def screen_cache_management(config: Dict):
         target = cache_dir / 'video_index'
     elif choice == 2:
         target = cache_dir / 'video_index_openclip'
-    elif choice in (3, 4):
+    elif choice in (3, 4, 5):
         # Clear grid search directories by prefix
         import shutil
-        prefix = 'gs_' if choice == 3 else 'vp_'
-        label = 'OpenCLIP' if choice == 3 else 'VideoPrism'
+        prefix_map = {3: ('gs_', 'OpenCLIP'), 4: ('vp_', 'VideoPrism'), 5: ('wav_kw_', 'Write-A-Video')}
+        prefix, label = prefix_map[choice]
         cleared = 0
         if cache_dir.exists():
             for item in cache_dir.iterdir():
@@ -828,11 +995,12 @@ def main_menu():
             ("Full Pipeline", "Index → Match → Assemble with custom settings"),
             ("OpenCLIP Grid Search", "Find optimal OpenCLIP parameters via automated sweep"),
             ("VideoPrism Grid Search", "Find optimal VideoPrism parameters via automated sweep"),
+            ("Write-A-Video Grid Search", "Two-stage retrieval: keyword filtering + OpenCLIP reranking"),
             ("Cache Management", "View and clear cached indexes"),
             ("Settings", "Configure GPU, output directory, etc."),
         ])
         
-        choice = get_choice(6)
+        choice = get_choice(7)
         
         if choice == 0:
             print(f"\n  {Colors.DIM}Goodbye!{Colors.END}\n")
@@ -846,8 +1014,10 @@ def main_menu():
         elif choice == 4:
             screen_videoprism_grid_search(config)
         elif choice == 5:
-            screen_cache_management(config)
+            screen_wav_grid_search(config)
         elif choice == 6:
+            screen_cache_management(config)
+        elif choice == 7:
             screen_settings(config)
 
 
