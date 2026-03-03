@@ -989,15 +989,22 @@ def screen_benchmark_upload(config: Dict):
         return
 
     # Identify segments and ground truth JSON files
+    # Known naming conventions:
+    #   segments.json -> segments file
+    #   mapping.json  -> ground truth file (maps segments to video clips)
     segments_file = None
     gt_file = None
 
     for jf in json_files:
         name_lower = jf.name.lower()
-        if 'segment' in name_lower:
-            segments_file = jf
-        elif 'ground' in name_lower or 'truth' in name_lower or 'gdtruth' in name_lower or 'gt' in name_lower:
+        # Check for ground truth / mapping files first (more specific matches)
+        if name_lower == 'mapping.json' or 'mapping' in name_lower:
             gt_file = jf
+        elif 'ground' in name_lower or 'truth' in name_lower or 'gdtruth' in name_lower or name_lower == 'gt.json':
+            gt_file = jf
+        # Check for segments files
+        elif name_lower == 'segments.json' or 'segment' in name_lower:
+            segments_file = jf
 
     # If we couldn't auto-detect, ask the user
     if len(json_files) >= 2 and (segments_file is None or gt_file is None):
@@ -1016,7 +1023,7 @@ def screen_benchmark_upload(config: Dict):
         # Only one JSON — ask what it is
         print(f"\n  {Colors.YELLOW}Found 1 JSON file: {json_files[0].name}{Colors.END}")
         print(f"    1. Segments file")
-        print(f"    2. Ground truth file")
+        print(f"    2. Ground truth file (mapping)")
         jtype = get_choice(2, "  What is this file? ")
         if jtype == 1:
             segments_file = json_files[0]
