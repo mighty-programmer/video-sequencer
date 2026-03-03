@@ -266,6 +266,18 @@ class WAVGridSearch:
         logger.info(f"Generated {len(configs)} configurations to test")
         return configs
 
+    def _clear_sweep_cache(self):
+        """Clear all cached WAV grid search indices to ensure fresh results."""
+        import shutil
+        if self.cache_base_dir.exists():
+            cleared = 0
+            for item in self.cache_base_dir.iterdir():
+                if item.is_dir() and (item.name.startswith('wav_kw_') or item.name.startswith('gs_')):
+                    shutil.rmtree(item)
+                    cleared += 1
+            if cleared:
+                logger.info(f"Cleared {cleared} cached WAV grid search indices for fresh sweep")
+    
     def _get_keyword_cache_dir(self, config: WAVGridSearchConfig) -> str:
         """Get cache directory for keyword index."""
         video_hash = hashlib.md5(self.video_dir.encode()).hexdigest()[:8]
@@ -476,6 +488,9 @@ class WAVGridSearch:
             if keyword_weights is None:
                 keyword_weights = [0.0]
 
+        # Clear any cached indices from previous runs to ensure fresh results
+        self._clear_sweep_cache()
+        
         # Generate all configurations
         configs = self._generate_configs(
             models=models,

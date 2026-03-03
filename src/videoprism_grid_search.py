@@ -355,6 +355,18 @@ class VideoPrismGridSearch:
         logger.info(f"Generated {len(configs)} configurations to test")
         return configs
     
+    def _clear_sweep_cache(self):
+        """Clear all cached VideoPrism grid search indices to ensure fresh results."""
+        import shutil
+        if self.cache_base_dir.exists():
+            cleared = 0
+            for item in self.cache_base_dir.iterdir():
+                if item.is_dir() and item.name.startswith('vp_'):
+                    shutil.rmtree(item)
+                    cleared += 1
+            if cleared:
+                logger.info(f"Cleared {cleared} cached VideoPrism grid search indices for fresh sweep")
+    
     def _get_cache_dir(self, config: VideoPrismGridSearchConfig) -> str:
         """Get a unique cache directory for a configuration.
         
@@ -551,6 +563,9 @@ class VideoPrismGridSearch:
                 num_frames_list = [16]
             if prompt_modes is None:
                 prompt_modes = ['none', 'template:video', 'template:scene']
+        
+        # Clear any cached indices from previous runs to ensure fresh results
+        self._clear_sweep_cache()
         
         # Generate all configurations
         configs = self._generate_configs(
