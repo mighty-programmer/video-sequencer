@@ -954,9 +954,8 @@ def screen_benchmark_upload(config: Dict):
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     # Get server hostname and username for scp command
-    hostname = socket.gethostname()
+    hostname = config.get('server_hostname', 'neghvar.ced.tuc.gr')
     username = os.environ.get('USER', os.environ.get('LOGNAME', 'user'))
-    home_dir = Path.home()
 
     # Generate scp command for the user
     print(f"\n  {Colors.BOLD}{Colors.BLUE}Run this command in a NEW local terminal on your Mac:{Colors.END}")
@@ -1163,7 +1162,7 @@ def screen_benchmark_download(config: Dict):
     print(f"    Size:     {total_size / 1024 / 1024:.1f} MB")
 
     # Generate scp command for download
-    hostname = socket.gethostname()
+    hostname = config.get('server_hostname', 'neghvar.ced.tuc.gr')
     username = os.environ.get('USER', os.environ.get('LOGNAME', 'user'))
 
     print(f"\n  {Colors.BOLD}{Colors.BLUE}Run this command in a local terminal on your Mac to download:{Colors.END}")
@@ -1187,6 +1186,7 @@ def screen_settings(config: Dict):
     config['gpu_device'] = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
     config['output'] = get_input("Default output directory", config.get('output', './output'))
     config['cache_dir'] = get_input("Cache directory", config.get('cache_dir', './cache'))
+    config['server_hostname'] = get_input("Server hostname (for scp)", config.get('server_hostname', 'neghvar.ced.tuc.gr'))
     
     print(f"\n  {Colors.GREEN}✓ Settings updated{Colors.END}")
     input("\n  Press Enter to continue...")
@@ -1275,6 +1275,7 @@ def main_menu():
         'gpu_device': 'cuda:0',
         'output': './output',
         'cache_dir': './cache',
+        'server_hostname': 'neghvar.ced.tuc.gr',
     }
     
     while True:
