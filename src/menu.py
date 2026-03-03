@@ -1177,6 +1177,104 @@ def screen_benchmark_download(config: Dict):
     input("\n  Press Enter to continue...")
 
 
+def screen_benchmark_delete(config: Dict):
+    """Delete a benchmark and all its associated files."""
+    import shutil
+
+    clear_screen()
+    print_header()
+    print(f"  {Colors.BOLD}Delete Benchmark{Colors.END}")
+    print(f"  {Colors.DIM}Remove a benchmark and all its associated files{Colors.END}")
+
+    base_dir = Path(config.get('benchmarks_dir', './data/benchmarks'))
+
+    # Select benchmark
+    bm = select_benchmark(str(base_dir))
+    if bm is None:
+        return
+
+    bm_num = bm['number']
+
+    # Gather all files/directories that will be deleted
+    items_to_delete = []
+
+    # Video directory
+    video_dir = base_dir / 'videos' / f'video_{bm_num}'
+    if video_dir.exists():
+        video_count = len([f for f in video_dir.iterdir() if f.is_file()])
+        size = sum(f.stat().st_size for f in video_dir.rglob('*') if f.is_file())
+        items_to_delete.append(('Videos', str(video_dir), video_count, size))
+
+    # Segments file
+    seg_file = base_dir / 'segments' / f'benchmark_{bm_num}_segments.json'
+    if seg_file.exists():
+        items_to_delete.append(('Segments', str(seg_file), 1, seg_file.stat().st_size))
+
+    # Ground truth file
+    gt_file = base_dir / 'gdtruth' / f'benchmark_{bm_num}_ground_truth.json'
+    if gt_file.exists():
+        items_to_delete.append(('Ground truth', str(gt_file), 1, gt_file.stat().st_size))
+
+    # Metadata file
+    meta_file = base_dir / 'metadata' / f'benchmark_{bm_num}_meta.json'
+    if meta_file.exists():
+        items_to_delete.append(('Metadata', str(meta_file), 1, meta_file.stat().st_size))
+
+    # Related cache directories
+    cache_dir = Path(config.get('cache_dir', './cache'))
+    cache_items = []
+    if cache_dir.exists():
+        for item in cache_dir.iterdir():
+            if item.is_dir():
+                cache_items.append(item)
+
+    if not items_to_delete:
+        print(f"\n  {Colors.YELLOW}No files found for benchmark {bm_num}{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    # Show what will be deleted
+    print(f"\n  {Colors.BOLD}The following will be permanently deleted:{Colors.END}")
+    total_size = 0
+    for label, path, count, size in items_to_delete:
+        total_size += size
+        size_str = f"{size / 1024:.1f} KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB"
+        print(f"    {Colors.RED}\u2717{Colors.END} {label}: {count} file(s) ({size_str})")
+        print(f"      {Colors.DIM}{path}{Colors.END}")
+
+    total_str = f"{total_size / 1024:.1f} KB" if total_size < 1024 * 1024 else f"{total_size / 1024 / 1024:.1f} MB"
+    print(f"\n  {Colors.DIM}Total size: {total_str}{Colors.END}")
+
+    # Confirm deletion
+    print(f"\n  {Colors.RED}{Colors.BOLD}WARNING: This action cannot be undone!{Colors.END}")
+    if not get_yes_no(f"Delete benchmark {bm_num} and all its files?", default=False):
+        print(f"  {Colors.DIM}Cancelled{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    # Delete everything
+    deleted = 0
+    for label, path, count, size in items_to_delete:
+        p = Path(path)
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            deleted += 1
+            print(f"  {Colors.GREEN}\u2713 Deleted {label}{Colors.END}")
+        except Exception as e:
+            print(f"  {Colors.RED}\u2717 Failed to delete {label}: {e}{Colors.END}")
+
+    # Ask about related cache
+    if cache_items:
+        print(f"\n  {Colors.DIM}Note: There may be cached indexes related to this benchmark.{Colors.END}")
+        print(f"  {Colors.DIM}Use Cache Management (option 8) to clear them if needed.{Colors.END}")
+
+    print(f"\n  {Colors.GREEN}{Colors.BOLD}\u2713 Benchmark {bm_num} deleted ({deleted} items removed){Colors.END}")
+    input("\n  Press Enter to continue...")
+
+
 def screen_settings(config: Dict):
     """Global settings."""
     clear_screen()
@@ -1284,17 +1382,18 @@ def main_menu():
         
         print_menu("Main Menu", [
             ("Quick Benchmark", "Run a benchmark test with auto-discovered settings"),
-            ("Full Pipeline", "Index → Match → Assemble with custom settings"),
+            ("Full Pipeline", "Index \u2192 Match \u2192 Assemble with custom settings"),
             ("OpenCLIP Grid Search", "Find optimal OpenCLIP parameters via automated sweep"),
             ("VideoPrism Grid Search", "Find optimal VideoPrism parameters via automated sweep"),
             ("Write-A-Video Grid Search", "Two-stage retrieval: keyword filtering + OpenCLIP reranking"),
             ("Upload Benchmark", "Import a local folder as a new benchmark (via scp)"),
             ("Download Benchmark", "Export a benchmark to a single folder for download"),
+            ("Delete Benchmark", "Permanently remove a benchmark and all its files"),
             ("Cache Management", "View and clear cached indexes"),
             ("Settings", "Configure GPU, output directory, etc."),
         ])
         
-        choice = get_choice(9)
+        choice = get_choice(10)
         
         if choice == 0:
             print(f"\n  {Colors.DIM}Goodbye!{Colors.END}\n")
@@ -1314,8 +1413,10 @@ def main_menu():
         elif choice == 7:
             screen_benchmark_download(config)
         elif choice == 8:
-            screen_cache_management(config)
+            screen_benchmark_delete(config)
         elif choice == 9:
+            screen_cache_management(config)
+        elif choice == 10:
             screen_settings(config)
 
 
