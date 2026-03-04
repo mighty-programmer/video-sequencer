@@ -667,7 +667,7 @@ def screen_videoprism_grid_search(config: Dict):
     if sweep_models:
         cmd.extend(['--models', 'videoprism_lvt_public_v1_base', 'videoprism_lvt_public_v1_large'])
     else:
-        cmd.extend(['--models', 'videoprism_lvt_public_v1_base'])
+        cmd.extend(['--models', 'videoprism_lvt_public_v1_large'])
     
     if sweep_frames:
         cmd.extend(['--frames', '8', '16', '32'])

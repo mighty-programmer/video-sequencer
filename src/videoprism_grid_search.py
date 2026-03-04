@@ -315,7 +315,7 @@ class VideoPrismGridSearch:
             List of VideoPrismGridSearchConfig objects
         """
         if models is None:
-            models = ['videoprism_lvt_public_v1_base', 'videoprism_lvt_public_v1_large']
+            models = ['videoprism_lvt_public_v1_large']
         if num_frames_list is None:
             num_frames_list = [8, 16, 32]
         if prompt_modes is None:
@@ -558,7 +558,7 @@ class VideoPrismGridSearch:
         """
         if quick:
             if models is None:
-                models = ['videoprism_lvt_public_v1_base']
+                models = ['videoprism_lvt_public_v1_large']
             if num_frames_list is None:
                 num_frames_list = [16]
             if prompt_modes is None:
