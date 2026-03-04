@@ -356,16 +356,26 @@ class VideoPrismGridSearch:
         return configs
     
     def _clear_sweep_cache(self):
-        """Clear all cached VideoPrism grid search indices to ensure fresh results."""
+        """Clear cached VideoPrism grid search indices specific to this benchmark to ensure fresh results."""
         import shutil
+        import hashlib
+        from pathlib import Path
+        
+        # Calculate the hash for the current video_dir being tested
+        # So we don't accidentally wipe a parallel grid search on another benchmark
+        video_dir_str = str(self.video_dir)
+        video_hash = hashlib.md5(video_dir_str.encode()).hexdigest()[:8]
+        prefix = f"vp_{video_hash}_"
+        
         if self.cache_base_dir.exists():
             cleared = 0
             for item in self.cache_base_dir.iterdir():
-                if item.is_dir() and item.name.startswith('vp_'):
+                if item.is_dir() and item.name.startswith(prefix):
                     shutil.rmtree(item)
                     cleared += 1
             if cleared:
-                logger.info(f"Cleared {cleared} cached VideoPrism grid search indices for fresh sweep")
+                video_name = Path(video_dir_str).name
+                logger.info(f"Cleared {cleared} cached VideoPrism indices for benchmark {video_name}")
     
     def _get_cache_dir(self, config: VideoPrismGridSearchConfig) -> str:
         """Get a unique cache directory for a configuration.
