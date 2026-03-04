@@ -207,16 +207,24 @@ class OpenCLIPGridSearch:
         return configs
     
     def _clear_sweep_cache(self):
-        """Clear all cached grid search indices to ensure fresh results."""
+        """Clear cached grid search indices specific to this benchmark to ensure fresh results."""
         import shutil
+        import hashlib
+        from pathlib import Path
+        
+        video_dir_str = str(self.video_dir)
+        video_hash = hashlib.md5(video_dir_str.encode()).hexdigest()[:8]
+        prefix = f"gs_{video_hash}_"
+        
         if self.cache_base_dir.exists():
             cleared = 0
             for item in self.cache_base_dir.iterdir():
-                if item.is_dir() and item.name.startswith('gs_'):
+                if item.is_dir() and item.name.startswith(prefix):
                     shutil.rmtree(item)
                     cleared += 1
             if cleared:
-                logger.info(f"Cleared {cleared} cached grid search indices for fresh sweep")
+                video_name = Path(video_dir_str).name
+                logger.info(f"Cleared {cleared} cached grid search indices for benchmark {video_name}")
     
     def _get_cache_dir(self, config: GridSearchConfig) -> str:
         """Get a unique cache directory for a configuration.
