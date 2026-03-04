@@ -635,6 +635,7 @@ def screen_videoprism_grid_search(config: Dict):
     use_ensemble = get_yes_no("Include ensemble prompts (template-based + LLM-generated)?", default=True)
     
     llm_model = None
+    reset_llm_cache = False
     if use_ensemble:
         print_menu("LLM for Prompt Generation", [
             ("Llama 3.2 3B Instruct", "Fast, good quality (via Ollama)"),
@@ -652,6 +653,9 @@ def screen_videoprism_grid_search(config: Dict):
             llm_model = get_input("Ollama model name")
         else:
             llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
+        
+        # Check if they want to reset cache
+        reset_llm_cache = get_yes_no("Delete and regenerate cached LLM prompts (if they exist)?", default=False)
     
     gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
     
@@ -686,6 +690,8 @@ def screen_videoprism_grid_search(config: Dict):
         if llm_model:
             prompt_modes.append('ensemble:llm')
             cmd.extend(['--llm-model', llm_model])
+            if reset_llm_cache:
+                cmd.append('--reset-llm-cache')
     
     cmd.extend(['--prompt-modes'] + prompt_modes)
     

@@ -541,7 +541,8 @@ class VideoPrismGridSearch:
         num_frames_list: List[int] = None,
         prompt_modes: List[str] = None,
         llm_model: str = None,
-        quick: bool = False
+        quick: bool = False,
+        reset_llm_cache: bool = False
     ) -> List[VideoPrismGridSearchResult]:
         """
         Run the full grid search.
@@ -575,16 +576,19 @@ class VideoPrismGridSearch:
             llm_model=llm_model
         )
         
-        # Pre-generate LLM prompts if needed (do this once, not per config)
         llm_prompts = None
         if llm_model and any(c.prompt_mode == 'ensemble:llm' for c in configs):
             logger.info(f"\nPre-generating LLM prompts using {llm_model}...")
-            cache_file = str(self.output_dir / 'llm_prompts_cache.json')
+            cache_file = self.output_dir / 'llm_prompts_cache.json'
+            if reset_llm_cache and cache_file.exists():
+                logger.info(f"Deleting existing LLM prompt cache at {cache_file}")
+                cache_file.unlink()
+            
             llm_prompts = create_ensemble_templates(
                 self.segments,
                 llm_model=llm_model,
                 num_variations=5,
-                cache_file=cache_file
+                cache_file=str(cache_file)
             )
             logger.info(f"Generated prompts for {len(llm_prompts)} segments")
         
@@ -798,6 +802,8 @@ Examples:
     parser.add_argument('--llm-model', default=None,
                        help='Ollama model for LLM ensemble prompts (e.g., llama3.2:3b). '
                             'Required for ensemble:llm prompt mode.')
+    parser.add_argument('--reset-llm-cache', action='store_true',
+                       help='Force delete and regenerate existing LLM prompt cache')
     
     # Windowing
     parser.add_argument('--no-windowing', action='store_true', help='Disable windowing')
@@ -855,7 +861,8 @@ Examples:
         num_frames_list=args.frames,
         prompt_modes=args.prompt_modes,
         llm_model=args.llm_model,
-        quick=args.quick
+        quick=args.quick,
+        reset_llm_cache=args.reset_llm_cache
     )
     
     if results:
