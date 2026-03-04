@@ -623,8 +623,9 @@ class VideoPrismGridSearch:
         return self.results
     
     def _save_results(self, elapsed: float):
-        """Save grid search results to JSON."""
+        """Save grid search results to JSON and TXT."""
         output_path = self.output_dir / 'videoprism_grid_search_results.json'
+        txt_path = self.output_dir / 'videoprism_grid_search_summary.txt'
         
         results_data = {
             'timestamp': datetime.now().isoformat(),
@@ -639,22 +640,27 @@ class VideoPrismGridSearch:
         
         with open(output_path, 'w') as f:
             json.dump(results_data, f, indent=2)
+            
+        summary_text = self._generate_summary_text(elapsed)
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(summary_text)
         
-        logger.info(f"Saved grid search results to {output_path}")
+        logger.info(f"Saved grid search results to {output_path} and {txt_path}")
     
-    def _print_summary(self, elapsed: float):
-        """Print a formatted summary of grid search results."""
-        print("\n")
-        print("╔" + "═" * 90 + "╗")
-        print("║" + " " * 22 + "VIDEOPRISM GRID SEARCH RESULTS SUMMARY" + " " * 30 + "║")
-        print("╠" + "═" * 90 + "╣")
-        print(f"║  Configurations tested: {len(self.results):<10}  "
+    def _generate_summary_text(self, elapsed: float) -> str:
+        """Generate a formatted summary of grid search results as a string."""
+        lines = []
+        lines.append("")
+        lines.append("╔" + "═" * 90 + "╗")
+        lines.append("║" + " " * 22 + "VIDEOPRISM GRID SEARCH RESULTS SUMMARY" + " " * 30 + "║")
+        lines.append("╠" + "═" * 90 + "╣")
+        lines.append(f"║  Configurations tested: {len(self.results):<10}  "
               f"Total time: {elapsed:.1f}s" + " " * (90 - 50 - len(f"{elapsed:.1f}")) + "║")
-        print("╠" + "═" * 90 + "╣")
+        lines.append("╠" + "═" * 90 + "╣")
         
         # Header
-        print("║  RANK │ MODEL   │ FRAMES │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
-        print("╟" + "─" * 90 + "╢")
+        lines.append("║  RANK │ MODEL   │ FRAMES │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
+        lines.append("╟" + "─" * 90 + "╢")
         
         # All results
         for i, result in enumerate(self.results[:30]):
@@ -665,14 +671,14 @@ class VideoPrismGridSearch:
             
             marker = " ★" if i == 0 else "  "
             
-            print(f"║{marker}{i+1:3d}  │ {model:<7} │ {frames:>6} │ {prompt:<18} │ "
+            lines.append(f"║{marker}{i+1:3d}  │ {model:<7} │ {frames:>6} │ {prompt:<18} │ "
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ "
                   f"{result.top_5_accuracy:5.1f}% │ {result.mrr:.4f} ║")
         
         if len(self.results) > 30:
-            print(f"║  ... and {len(self.results) - 30} more configurations" + " " * (90 - 40) + "║")
+            lines.append(f"║  ... and {len(self.results) - 30} more configurations" + " " * (90 - 40) + "║")
         
-        print("╠" + "═" * 90 + "╣")
+        lines.append("╠" + "═" * 90 + "╣")
         
         # Best configuration
         if self.results:
