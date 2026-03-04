@@ -453,8 +453,9 @@ class OpenCLIPGridSearch:
         return self.results
     
     def _save_results(self, elapsed: float):
-        """Save grid search results to JSON."""
+        """Save grid search results to JSON and TXT."""
         output_path = self.output_dir / 'grid_search_results.json'
+        txt_path = self.output_dir / 'grid_search_summary.txt'
         
         results_data = {
             'timestamp': datetime.now().isoformat(),
@@ -468,22 +469,31 @@ class OpenCLIPGridSearch:
         
         with open(output_path, 'w') as f:
             json.dump(results_data, f, indent=2)
+
+        summary_text = self._generate_summary_text(elapsed)
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(summary_text)
         
-        logger.info(f"Saved grid search results to {output_path}")
+        logger.info(f"Saved grid search results to {output_path} and {txt_path}")
     
     def _print_summary(self, elapsed: float):
         """Print a beautiful summary of grid search results."""
-        print("\n")
-        print("╔" + "═" * 98 + "╗")
-        print("║" + " " * 30 + "GRID SEARCH RESULTS SUMMARY" + " " * 41 + "║")
-        print("╠" + "═" * 98 + "╣")
-        print(f"║  Configurations tested: {len(self.results):<10}  "
-              f"Total time: {elapsed:.1f}s" + " " * (98 - 50 - len(f"{elapsed:.1f}")) + "║")
-        print("╠" + "═" * 98 + "╣")
+        print(self._generate_summary_text(elapsed))
+
+    def _generate_summary_text(self, elapsed: float) -> str:
+        """Generate a formatted summary of grid search results as a string."""
+        lines = []
+        lines.append("\n")
+        lines.append("╔" + "═" * 98 + "╗")
+        lines.append("║" + " " * 30 + "GRID SEARCH RESULTS SUMMARY" + " " * 41 + "║")
+        lines.append("╠" + "═" * 98 + "╣")
+        lines.append(f"║  Configurations tested: {len(self.results):<10}  "
+              f"Total time: {elapsed:.1f}s" + " " * (98 - 51 - len(f"{elapsed:.1f}")) + "║")
+        lines.append("╠" + "═" * 98 + "╣")
         
         # Header
-        print("║  RANK │ MODEL      │ FRAMES │ AGG        │ PROMPT MODE        │ EXACT% │ TOP3%  │ MRR    ║")
-        print("╟" + "─" * 98 + "╢")
+        lines.append("║  RANK │ MODEL      │ FRAMES │ AGG        │ PROMPT MODE        │ EXACT% │ TOP3%  │ MRR    ║")
+        lines.append("╟" + "─" * 98 + "╢")
         
         # Top results (show all, max 30)
         for i, result in enumerate(self.results[:30]):
@@ -495,33 +505,33 @@ class OpenCLIPGridSearch:
             
             marker = " ★" if i == 0 else "  "
             
-            print(f"║{marker}{i+1:3d}  │ {model:<10} │ {frames:>6} │ {agg:<10} │ {prompt:<18} │ "
+            lines.append(f"║{marker}{i+1:3d}  │ {model:<10} │ {frames:>6} │ {agg:<10} │ {prompt:<18} │ "
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ {result.mrr:.4f} ║")
         
         if len(self.results) > 30:
-            print(f"║  ... and {len(self.results) - 30} more configurations" + " " * (98 - 40) + "║")
+            lines.append(f"║  ... and {len(self.results) - 30} more configurations" + " " * (98 - 40) + "║")
         
-        print("╠" + "═" * 98 + "╣")
+        lines.append("╠" + "═" * 98 + "╣")
         
         # Best configuration
         if self.results:
             best = self.results[0]
             cfg = best.config
-            print("║" + " " * 35 + "★ BEST CONFIGURATION ★" + " " * 41 + "║")
-            print("╟" + "─" * 98 + "╢")
-            print(f"║  Model:       {cfg['model_name']:<82} ║")
-            print(f"║  Frames:      {cfg['num_frames']:<82} ║")
-            print(f"║  Aggregation: {cfg['aggregation']:<82} ║")
-            print(f"║  Prompt Mode: {cfg['prompt_mode']:<82} ║")
-            print("╟" + "─" * 98 + "╢")
-            print(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
+            lines.append("║" + " " * 35 + "★ BEST CONFIGURATION ★" + " " * 41 + "║")
+            lines.append("╟" + "─" * 98 + "╢")
+            lines.append(f"║  Model:       {cfg['model_name']:<82} ║")
+            lines.append(f"║  Frames:      {cfg['num_frames']:<82} ║")
+            lines.append(f"║  Aggregation: {cfg['aggregation']:<82} ║")
+            lines.append(f"║  Prompt Mode: {cfg['prompt_mode']:<82} ║")
+            lines.append("╟" + "─" * 98 + "╢")
+            lines.append(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
                   f"Top-3: {best.top_3_accuracy:.1f}%   │   "
                   f"Top-5: {best.top_5_accuracy:.1f}%   │   "
                   f"MRR: {best.mrr:.4f}" + " " * 20 + "║")
             
             # Generate CLI command for best config
-            print("╟" + "─" * 98 + "╢")
-            print("║  Run with best config:" + " " * 75 + "║")
+            lines.append("╟" + "─" * 98 + "╢")
+            lines.append("║  Run with best config:" + " " * 75 + "║")
             
             cmd_parts = [
                 "python src/main.py",
@@ -529,10 +539,10 @@ class OpenCLIPGridSearch:
                 f"--openclip-model {cfg['model_name']}",
             ]
             cmd = "  ".join(cmd_parts)
-            print(f"║    {cmd:<94} ║")
+            lines.append(f"║    {cmd:<94} ║")
         
-        print("╚" + "═" * 98 + "╝")
-        print()
+        lines.append("╚" + "═" * 98 + "╝")
+        return "\n".join(lines)
 
 
 class _LLMEnsembleMatcher(OpenCLIPTextMatcher):

@@ -555,39 +555,49 @@ class WAVGridSearch:
         return self.results
 
     def _save_results(self, elapsed: float):
-        """Save grid search results to JSON."""
+        """Save grid search results to JSON and TXT."""
         output_path = self.output_dir / 'wav_grid_search_results.json'
-
+        txt_path = self.output_dir / 'wav_grid_search_summary.txt'
+        
         results_data = {
             'timestamp': datetime.now().isoformat(),
-            'encoder': 'write-a-video (two-stage)',
+            'encoder': 'openclip',
+            'matching': 'wav',
             'total_configs_tested': len(self.results),
             'total_time_seconds': round(elapsed, 2),
             'video_dir': self.video_dir,
             'segments_file': self.segments_file,
             'ground_truth_file': self.ground_truth_file,
-            'yolo_model': self.yolo_model,
             'results': [asdict(r) for r in self.results]
         }
-
+        
         with open(output_path, 'w') as f:
             json.dump(results_data, f, indent=2)
 
-        logger.info(f"Saved grid search results to {output_path}")
+        summary_text = self._generate_summary_text(elapsed)
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(summary_text)
+            
+        logger.info(f"Saved grid search results to {output_path} and {txt_path}")
 
     def _print_summary(self, elapsed: float):
         """Print a formatted summary of grid search results."""
-        print("\n")
-        print("╔" + "═" * 105 + "╗")
-        print("║" + " " * 25 + "WRITE-A-VIDEO GRID SEARCH RESULTS SUMMARY" + " " * 39 + "║")
-        print("╠" + "═" * 105 + "╣")
-        print(f"║  Configurations tested: {len(self.results):<10}  "
-              f"Total time: {elapsed:.1f}s" + " " * (105 - 50 - len(f"{elapsed:.1f}")) + "║")
-        print("╠" + "═" * 105 + "╣")
+        print(self._generate_summary_text(elapsed))
+
+    def _generate_summary_text(self, elapsed: float) -> str:
+        """Generate a formatted summary of grid search results as a string."""
+        lines = []
+        lines.append("\n")
+        lines.append("╔" + "═" * 105 + "╗")
+        lines.append("║" + " " * 25 + "WRITE-A-VIDEO GRID SEARCH RESULTS SUMMARY" + " " * 39 + "║")
+        lines.append("╠" + "═" * 105 + "╣")
+        lines.append(f"║  Configurations tested: {len(self.results):<10}  "
+              f"Total time: {elapsed:.1f}s" + " " * (105 - 51 - len(f"{elapsed:.1f}")) + "║")
+        lines.append("╠" + "═" * 105 + "╣")
 
         # Header
-        print("║  RANK │ MODEL      │ FRAMES │ AGG        │ PROMPT MODE        │ POOL │ EXACT% │ TOP3%  │ MRR    ║")
-        print("╟" + "─" * 105 + "╢")
+        lines.append("║  RANK │ MODEL      │ FRAMES │ AGG        │ PROMPT MODE        │ POOL │ EXACT% │ TOP3%  │ MRR    ║")
+        lines.append("╟" + "─" * 105 + "╢")
 
         # All results
         for i, result in enumerate(self.results[:30]):
@@ -600,40 +610,41 @@ class WAVGridSearch:
 
             marker = " ★" if i == 0 else "  "
 
-            print(f"║{marker}{i+1:3d}  │ {model:<10} │ {frames:>6} │ {agg:<10} │ {prompt:<18} │ {pool:>4} │ "
+            lines.append(f"║{marker}{i+1:3d}  │ {model:<10} │ {frames:>6} │ {agg:<10} │ {prompt:<18} │ {pool:>4} │ "
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ {result.mrr:.4f} ║")
 
         if len(self.results) > 30:
             remaining = len(self.results) - 30
-            print(f"║  ... and {remaining} more configurations" + " " * (105 - 35 - len(str(remaining))) + "║")
+            lines.append(f"║  ... and {remaining} more configurations" + " " * (105 - 35 - len(str(remaining))) + "║")
 
-        print("╠" + "═" * 105 + "╣")
+        lines.append("╠" + "═" * 105 + "╣")
 
         # Best configuration
         if self.results:
             best = self.results[0]
             cfg = best.config
-            print("║" + " " * 35 + "★ BEST CONFIGURATION ★" + " " * 48 + "║")
-            print("╟" + "─" * 105 + "╢")
-            print(f"║  Model:            {cfg['model_name']:<84} ║")
-            print(f"║  Frames:           {cfg['num_frames']:<84} ║")
-            print(f"║  Aggregation:      {cfg['aggregation']:<84} ║")
-            print(f"║  Prompt Mode:      {cfg['prompt_mode']:<84} ║")
-            print(f"║  Candidate Pool:   {cfg['candidate_pool_size']:<84} ║")
-            print(f"║  Keyword Weight:   {cfg['keyword_weight']:<84} ║")
-            print("╟" + "─" * 105 + "╢")
-            print(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
+            lines.append("║" + " " * 35 + "★ BEST CONFIGURATION ★" + " " * 48 + "║")
+            lines.append("╟" + "─" * 105 + "╢")
+            lines.append(f"║  Model:            {cfg['model_name']:<84} ║")
+            lines.append(f"║  Frames:           {cfg['num_frames']:<84} ║")
+            lines.append(f"║  Aggregation:      {cfg['aggregation']:<84} ║")
+            lines.append(f"║  Prompt Mode:      {cfg['prompt_mode']:<84} ║")
+            lines.append(f"║  Candidate Pool:   {cfg['candidate_pool_size']:<84} ║")
+            lines.append(f"║  Keyword Weight:   {cfg['keyword_weight']:<84} ║")
+            lines.append("╟" + "─" * 105 + "╢")
+            lines.append(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
                   f"Top-3: {best.top_3_accuracy:.1f}%   │   "
                   f"Top-5: {best.top_5_accuracy:.1f}%   │   "
                   f"MRR: {best.mrr:.4f}" + " " * 27 + "║")
-            print("╟" + "─" * 105 + "╢")
-            print("║  Keyword indexing time: "
+            lines.append("╟" + "─" * 105 + "╢")
+            lines.append("║  Keyword indexing time: "
                   f"{best.keyword_indexing_time:.1f}s   │   "
                   f"OpenCLIP indexing: {best.openclip_indexing_time:.1f}s   │   "
                   f"Matching: {best.matching_time:.1f}s" + " " * 20 + "║")
 
-        print("╚" + "═" * 105 + "╝")
-        print()
+        lines.append("╚" + "═" * 105 + "╝")
+        return "\n".join(lines)
+
 
 
 def _resolve_benchmark_paths(benchmark_num: str, base_dir: str = './data/benchmarks') -> dict:
