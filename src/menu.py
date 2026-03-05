@@ -75,7 +75,13 @@ def get_choice(max_val: int, prompt: str = "  Select option: ") -> int:
             return 0
 
 
-def get_input(prompt: str, default: str = None) -> str:
+def print_title(title: str):
+    """Print a section title."""
+    print(f"\n{Colors.BOLD}{Colors.YELLOW}  {title}{Colors.END}")
+    print(f"  {'─' * 56}")
+
+
+def get_input(prompt: str, default: Optional[str] = None) -> str:
     """Get text input with optional default."""
     if default:
         display = f"  {prompt} [{Colors.DIM}{default}{Colors.END}]: "
@@ -333,6 +339,66 @@ def run_command(cmd: List[str], dry_run: bool = False):
         print(f"  {Colors.RED}Error: {e}{Colors.END}")
 
 
+def screen_compare_all_models(config: dict):
+    """Interactive menu for checking all models simultaneously via grid search"""
+    clear_screen()
+    print_header()
+    print_title("Compare All Models (Parallel Grid Search)")
+    
+    # Prompt for Benchmark Number
+    print(f"  {Colors.DIM}This tool runs 3 parallel background sessions to test every combination possible.{Colors.END}")
+    print(f"  {Colors.DIM}It creates isolated cache environments and generates identical LLM prompts. {Colors.END}")
+    benchmark = get_input("\nEnter Benchmark Number (1-6)", "6")
+    
+    # Check what Ollama model to use
+    print_menu("\nLLM for Shared Prompt Generation", [
+        ("Llama 3.2 3B Instruct", "Fast, good quality (via Ollama)"),
+        ("Mistral 7B Instruct", "Higher quality paraphrasing (via Ollama)"),
+        ("Phi-3 Mini 3.8B", "Compact, efficient (via Ollama)"),
+        ("Custom Ollama model", "Specify your own model name"),
+    ], show_back=False)
+    llm_choice = get_choice(4, "  Select LLM: ")
+    llm_models = {
+        1: 'llama3.2:3b',
+        2: 'mistral:7b-instruct',
+        3: 'phi3:mini',
+    }
+    if llm_choice == 4:
+        llm_model = get_input("Ollama model name")
+    else:
+        llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
+        
+    gpu_device = get_input("\nGPU device", config.get('gpu_device', 'cuda:0'))
+    disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
+    
+    output_dir = get_input("Base Output Directory", f"./output/comparison_b{benchmark}")
+    
+    # Build orchestrator command
+    cmd = ['python', 'src/compare_all_models.py']
+    cmd.extend(['--benchmark', benchmark])
+    cmd.extend(['--output', output_dir])
+    cmd.extend(['--llm-model', llm_model])
+    cmd.extend(['--device', gpu_device])
+    if disable_windowing:
+        cmd.append('--no-windowing')
+        
+    cmd_str = ' \\\n    '.join(cmd)
+    print(f"\n{Colors.BOLD}{Colors.BLUE}  Command:{Colors.END}")
+    print(f"  {Colors.DIM}{cmd_str}{Colors.END}\n")
+    
+    if get_yes_no("Run parallel comparison?"):
+        print(f"\n{Colors.BOLD}Starting parallel executions...{Colors.END}")
+        
+        try:
+            # We run this in the foreground so it can orchestrate, it will exit once tmux is spawned.
+            subprocess.run(" ".join(cmd), shell=True, check=True)
+            print(f"\n{Colors.GREEN}✓ Dispatch successful.{Colors.END}")
+        except subprocess.CalledProcessError as e:
+            print(f"\n{Colors.RED}✗ Orchestrator failed with code {e.returncode}{Colors.END}")
+        
+        input("\n  Press Enter to continue...")
+
+
 # ─── Main Menu Screens ─────────────────────────────────────────────
 
 def screen_quick_benchmark(config: Dict):
@@ -506,6 +572,8 @@ def screen_grid_search(config: Dict):
     sweep_prompts = get_yes_no("Sweep prompt templates (none, 'a video of...', 'a photo of...')?", default=True)
     use_ensemble = get_yes_no("Include ensemble of prompts (LLM-generated)?", default=True)
     
+    llm_model = None
+    reset_llm_cache = False
     if use_ensemble:
         print_menu("LLM for Prompt Generation", [
             ("Llama 3.2 3B Instruct", "Fast, good quality (via Ollama)"),
@@ -523,10 +591,12 @@ def screen_grid_search(config: Dict):
             llm_model = get_input("Ollama model name")
         else:
             llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
-    else:
-        llm_model = None
+            
+        reset_llm_cache = get_yes_no("Delete and regenerate cached LLM prompts (if they exist)?", default=False)
     
     gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
+    
+    disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
     
     # Build grid search command
     cmd = ['python', 'src/grid_search.py']
@@ -564,9 +634,14 @@ def screen_grid_search(config: Dict):
         if llm_model:
             prompt_modes.append('ensemble:llm')
             cmd.extend(['--llm-model', llm_model])
+            if reset_llm_cache:
+                cmd.append('--reset-llm-cache')
     
     cmd.extend(['--prompt-modes'] + prompt_modes)
     
+    if disable_windowing:
+        cmd.append('--no-windowing')
+        
     cmd_str = ' \\\n    '.join(cmd)
     print(f"\n{Colors.BOLD}{Colors.BLUE}  Command:{Colors.END}")
     print(f"  {Colors.DIM}{cmd_str}{Colors.END}\n")
@@ -659,6 +734,8 @@ def screen_videoprism_grid_search(config: Dict):
     
     gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
     
+    disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
+    
     # Build grid search command
     cmd = ['python', 'src/videoprism_grid_search.py']
     cmd.extend(['--video-dir', config['video_dir']])
@@ -666,7 +743,8 @@ def screen_videoprism_grid_search(config: Dict):
     cmd.extend(['--ground-truth', config['ground_truth']])
     cmd.extend(['--output', config['output']])
     cmd.extend(['--device', gpu_device])
-    cmd.append('--no-windowing')
+    if disable_windowing:
+        cmd.append('--no-windowing')
     
     if sweep_models:
         cmd.extend(['--models', 'videoprism_lvt_public_v1_base', 'videoprism_lvt_public_v1_large'])
@@ -791,6 +869,7 @@ def screen_wav_grid_search(config: Dict):
     use_ensemble = get_yes_no("Include ensemble prompts (LLM-generated)?", default=True)
     
     llm_model = None
+    reset_llm_cache = False
     if use_ensemble:
         print_menu("LLM for Prompt Generation", [
             ("Llama 3.2 3B Instruct", "Fast, good quality (via Ollama)"),
@@ -808,6 +887,8 @@ def screen_wav_grid_search(config: Dict):
             llm_model = get_input("Ollama model name")
         else:
             llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
+            
+        reset_llm_cache = get_yes_no("Delete and regenerate cached LLM prompts (if they exist)?", default=False)
     
     # WAV-specific: candidate pool size and keyword weight
     print(f"\n  {Colors.BOLD}Two-Stage Specific Parameters{Colors.END}")
@@ -816,6 +897,8 @@ def screen_wav_grid_search(config: Dict):
     
     gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
     
+    disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
+    
     # Build grid search command
     cmd = ['python', 'src/wav_grid_search.py']
     cmd.extend(['--video-dir', config['video_dir']])
@@ -823,7 +906,8 @@ def screen_wav_grid_search(config: Dict):
     cmd.extend(['--ground-truth', config['ground_truth']])
     cmd.extend(['--output', config['output']])
     cmd.extend(['--device', gpu_device])
-    cmd.append('--no-windowing')
+    if disable_windowing:
+        cmd.append('--no-windowing')
     cmd.extend(['--yolo-model', yolo_model])
     cmd.extend(['--fps', str(fps)])
     
@@ -859,6 +943,8 @@ def screen_wav_grid_search(config: Dict):
         if llm_model:
             prompt_modes.append('ensemble:llm')
             cmd.extend(['--llm-model', llm_model])
+            if reset_llm_cache:
+                cmd.append('--reset-llm-cache')
     
     cmd.extend(['--prompt-modes'] + prompt_modes)
     
@@ -1380,11 +1466,30 @@ def main_menu():
         'output': './output',
         'cache_dir': './cache',
         'server_hostname': 'neghvar.ced.tuc.gr',
+        'video_dir': None, # Initialize video_dir for screen_main
     }
     
+    # Map menu choices to screen functions
+    menu_actions = {
+        1: screen_quick_benchmark,
+        2: screen_full_pipeline,
+        3: screen_grid_search,
+        4: screen_videoprism_grid_search,
+        5: screen_wav_grid_search,
+        6: screen_compare_all_models, # New function
+        7: screen_benchmark_upload,
+        8: screen_benchmark_download,
+        9: screen_benchmark_delete,
+        10: screen_cache_management,
+        11: screen_settings,
+    }
+
     while True:
         clear_screen()
         print_header()
+        
+        bm_name = Path(config['video_dir']).name if config.get('video_dir') else "None"
+        print(f"\n{Colors.DIM}  Current Benchmark: {bm_name}{Colors.END}")
         
         print_menu("Main Menu", [
             ("Quick Benchmark", "Run a benchmark test with auto-discovered settings"),
@@ -1392,6 +1497,7 @@ def main_menu():
             ("OpenCLIP Grid Search", "Find optimal OpenCLIP parameters via automated sweep"),
             ("VideoPrism Grid Search", "Find optimal VideoPrism parameters via automated sweep"),
             ("Write-A-Video Grid Search", "Two-stage retrieval: keyword filtering + OpenCLIP reranking"),
+            ("Compare All Models (Parallel Grid Search)", "Run all grid searches in parallel background sessions"), # New menu item
             ("Upload Benchmark", "Import a local folder as a new benchmark (via scp)"),
             ("Download Benchmark", "Export a benchmark to a single folder for download"),
             ("Delete Benchmark", "Permanently remove a benchmark and all its files"),
@@ -1399,31 +1505,13 @@ def main_menu():
             ("Settings", "Configure GPU, output directory, etc."),
         ])
         
-        choice = get_choice(10)
+        choice = get_choice(len(menu_actions)) # Adjust choice range
         
         if choice == 0:
             print(f"\n  {Colors.DIM}Goodbye!{Colors.END}\n")
             break
-        elif choice == 1:
-            screen_quick_benchmark(config)
-        elif choice == 2:
-            screen_full_pipeline(config)
-        elif choice == 3:
-            screen_grid_search(config)
-        elif choice == 4:
-            screen_videoprism_grid_search(config)
-        elif choice == 5:
-            screen_wav_grid_search(config)
-        elif choice == 6:
-            screen_benchmark_upload(config)
-        elif choice == 7:
-            screen_benchmark_download(config)
-        elif choice == 8:
-            screen_benchmark_delete(config)
-        elif choice == 9:
-            screen_cache_management(config)
-        elif choice == 10:
-            screen_settings(config)
+        elif choice in menu_actions:
+            menu_actions[choice](config)
 
 
 if __name__ == '__main__':

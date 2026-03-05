@@ -470,18 +470,20 @@ class OpenCLIPGridSearch:
         with open(output_path, 'w') as f:
             json.dump(results_data, f, indent=2)
 
-        summary_text = self._generate_summary_text(elapsed)
+        summary_text = self._generate_summary_text(elapsed, limit=30)
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write(summary_text)
         
         logger.info(f"Saved grid search results to {output_path} and {txt_path}")
     
     def _print_summary(self, elapsed: float):
-        """Print a beautiful summary of grid search results."""
-        print(self._generate_summary_text(elapsed))
+        """Print a beautiful summary of grid search results (top 30)."""
+        print(self._generate_summary_text(elapsed, limit=30))
 
-    def _generate_summary_text(self, elapsed: float) -> str:
+    def _generate_summary_text(self, elapsed: float, limit: Optional[int] = None) -> str:
         """Generate a formatted summary of grid search results as a string."""
+        results_to_show = self.results[:limit] if limit else self.results
+        
         lines = []
         lines.append("\n")
         lines.append("╔" + "═" * 98 + "╗")
@@ -495,8 +497,8 @@ class OpenCLIPGridSearch:
         lines.append("║  RANK │ MODEL      │ FRAMES │ AGG        │ PROMPT MODE        │ EXACT% │ TOP3%  │ MRR    ║")
         lines.append("╟" + "─" * 98 + "╢")
         
-        # Top results (show all, max 30)
-        for i, result in enumerate(self.results[:30]):
+        # Results
+        for i, result in enumerate(results_to_show):
             cfg = result.config
             model = cfg['model_name'][:10]
             frames = str(cfg['num_frames'])
@@ -508,8 +510,9 @@ class OpenCLIPGridSearch:
             lines.append(f"║{marker}{i+1:3d}  │ {model:<10} │ {frames:>6} │ {agg:<10} │ {prompt:<18} │ "
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ {result.mrr:.4f} ║")
         
-        if len(self.results) > 30:
-            lines.append(f"║  ... and {len(self.results) - 30} more configurations" + " " * (98 - 40) + "║")
+        if limit and len(self.results) > limit:
+            lines.append(f"║  ... and {len(self.results) - limit} more configurations" + " " * (98 - 40) + "║")
+        
         
         lines.append("╠" + "═" * 98 + "╣")
         

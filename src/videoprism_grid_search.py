@@ -627,7 +627,7 @@ class VideoPrismGridSearch:
         # Save results
         self._save_results(elapsed)
         
-        # Print summary
+        # Print summary (top 30)
         self._print_summary(elapsed)
         
         return self.results
@@ -651,29 +651,35 @@ class VideoPrismGridSearch:
         with open(output_path, 'w') as f:
             json.dump(results_data, f, indent=2)
             
-        summary_text = self._generate_summary_text(elapsed)
+        summary_text = self._generate_summary_text(elapsed, limit=30)
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write(summary_text)
         
         logger.info(f"Saved grid search results to {output_path} and {txt_path}")
-    
-    def _generate_summary_text(self, elapsed: float) -> str:
+
+    def _print_summary(self, elapsed: float):
+        """Print a formatted summary of grid search results (top 30)."""
+        print(self._generate_summary_text(elapsed, limit=30))
+
+    def _generate_summary_text(self, elapsed: float, limit: Optional[int] = None) -> str:
         """Generate a formatted summary of grid search results as a string."""
+        results_to_show = self.results[:limit] if limit else self.results
+        
         lines = []
-        lines.append("")
+        lines.append("\n")
         lines.append("╔" + "═" * 90 + "╗")
         lines.append("║" + " " * 22 + "VIDEOPRISM GRID SEARCH RESULTS SUMMARY" + " " * 30 + "║")
         lines.append("╠" + "═" * 90 + "╣")
         lines.append(f"║  Configurations tested: {len(self.results):<10}  "
-              f"Total time: {elapsed:.1f}s" + " " * (90 - 50 - len(f"{elapsed:.1f}")) + "║")
+              f"Total time: {elapsed:.1f}s" + " " * (90 - 51 - len(f"{elapsed:.1f}")) + "║")
         lines.append("╠" + "═" * 90 + "╣")
         
         # Header
         lines.append("║  RANK │ MODEL   │ FRAMES │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
         lines.append("╟" + "─" * 90 + "╢")
         
-        # All results
-        for i, result in enumerate(self.results[:30]):
+        # Results
+        for i, result in enumerate(results_to_show):
             cfg = result.config
             model = 'base' if 'base' in cfg['model_name'] else 'large'
             frames = str(cfg['num_frames'])
@@ -685,8 +691,8 @@ class VideoPrismGridSearch:
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ "
                   f"{result.top_5_accuracy:5.1f}% │ {result.mrr:.4f} ║")
         
-        if len(self.results) > 30:
-            lines.append(f"║  ... and {len(self.results) - 30} more configurations" + " " * (90 - 40) + "║")
+        if limit is not None and len(self.results) > limit:
+            lines.append(f"║  ... and {len(self.results) - limit} more configurations" + " " * (90 - 40) + "║")
         
         lines.append("╠" + "═" * 90 + "╣")
         
@@ -695,32 +701,32 @@ class VideoPrismGridSearch:
             best = self.results[0]
             cfg = best.config
             model_display = 'base' if 'base' in cfg['model_name'] else 'large'
-            print("║" + " " * 30 + "★ BEST CONFIGURATION ★" + " " * 38 + "║")
-            print("╟" + "─" * 90 + "╢")
-            print(f"║  Model:       VideoPrism LVT {model_display:<58} ║")
-            print(f"║  Full name:   {cfg['model_name']:<74} ║")
-            print(f"║  Frames:      {cfg['num_frames']:<74} ║")
-            print(f"║  Prompt Mode: {cfg['prompt_mode']:<74} ║")
-            print("╟" + "─" * 90 + "╢")
-            print(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
+            lines.append("║" + " " * 30 + "★ BEST CONFIGURATION ★" + " " * 38 + "║")
+            lines.append("╟" + "─" * 90 + "╢")
+            lines.append(f"║  Model:       VideoPrism LVT {model_display:<58} ║")
+            lines.append(f"║  Full name:   {cfg['model_name']:<74} ║")
+            lines.append(f"║  Frames:      {cfg['num_frames']:<74} ║")
+            lines.append(f"║  Prompt Mode: {cfg['prompt_mode']:<74} ║")
+            lines.append("╟" + "─" * 90 + "╢")
+            lines.append(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
                   f"Top-3: {best.top_3_accuracy:.1f}%   │   "
                   f"Top-5: {best.top_5_accuracy:.1f}%   │   "
                   f"MRR: {best.mrr:.4f}" + " " * 12 + "║")
             
             # Generate CLI command for best config
-            print("╟" + "─" * 90 + "╢")
-            print("║  Run with best config:" + " " * 67 + "║")
+            lines.append("╟" + "─" * 90 + "╢")
+            lines.append("║  Run with best config:" + " " * 67 + "║")
             
             cmd = f"python src/main.py --encoder videoprism --videoprism-model {cfg['model_name']}"
             # Wrap long command
             if len(cmd) > 86:
-                print(f"║    {cmd[:86]} ║")
-                print(f"║    {cmd[86:]:<86} ║")
+                lines.append(f"║    {cmd[:86]} ║")
+                lines.append(f"║    {cmd[86:]:<86} ║")
             else:
-                print(f"║    {cmd:<86} ║")
+                lines.append(f"║    {cmd:<86} ║")
         
-        print("╚" + "═" * 90 + "╝")
-        print()
+        lines.append("╚" + "═" * 90 + "╝")
+        return "\n".join(lines)
 
 
 def _resolve_benchmark_paths(benchmark_num: str, base_dir: str = './data/benchmarks') -> dict:
