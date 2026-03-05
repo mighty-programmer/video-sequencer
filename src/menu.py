@@ -368,7 +368,7 @@ def screen_compare_all_models(config: dict):
     else:
         llm_model = llm_models.get(llm_choice, 'llama3.2:3b')
         
-    gpu_device = get_input("\nGPU device", config.get('gpu_device', 'cuda:0'))
+    gpu_device = get_input("\nGPU device(s) (comma-separated for multi-gpu, e.g., cuda:0,cuda:1)", config.get('gpu_device', 'cuda:0'))
     disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
     
     output_dir = get_input("Base Output Directory", f"./output/comparison_b{benchmark}")

@@ -165,20 +165,25 @@ def main():
 
     create_summary_script(base_output)
 
+    # Parse comma-separated list of GPUs
+    devices = [d.strip() for d in args.device.split(',') if d.strip()]
+    if not devices:
+        devices = ['cuda:0']
+        
     commands = []
     
     common_args = [
         f"--video-dir {bm_paths['video_dir']}",
         f"--segments {bm_paths['segments']}",
         f"--ground-truth {bm_paths['ground_truth']}",
-        f"--device {args.device}",
         f"--llm-model {args.llm_model}"
     ]
     if args.no_windowing:
         common_args.append("--no-windowing")
         
-    # OpenCLIP Max Combinations
+    # OpenCLIP Max Combinations (Gets GPU 0)
     oc_args = common_args + [
+        f"--device {devices[0 % len(devices)]}",
         f"--output {dirs['openclip']['out']}",
         f"--cache-dir {dirs['openclip']['cache']}",
         "--models ViT-B-32 ViT-B-16 ViT-L-14",
@@ -188,8 +193,9 @@ def main():
     ]
     commands.append(("openclip_compare", f"python src/grid_search.py {' '.join(oc_args)}"))
     
-    # VideoPrism Max Combinations  
+    # VideoPrism Max Combinations (Gets GPU 1)
     vp_args = common_args + [
+        f"--device {devices[1 % len(devices)]}",
         f"--output {dirs['videoprism']['out']}",
         f"--cache-dir {dirs['videoprism']['cache']}",
         "--models videoprism_lvt_public_v1_base videoprism_lvt_public_v1_large",
@@ -198,8 +204,9 @@ def main():
     ]
     commands.append(("videoprism_compare", f"python src/videoprism_grid_search.py {' '.join(vp_args)}"))
     
-    # WAV Max Combinations
+    # WAV Max Combinations (Gets GPU 2)
     wav_args = common_args + [
+        f"--device {devices[2 % len(devices)]}",
         f"--output {dirs['wav']['out']}",
         f"--cache-dir {dirs['wav']['cache']}",
         "--models ViT-B-32 ViT-B-16 ViT-L-14",
