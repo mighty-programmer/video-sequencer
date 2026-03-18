@@ -170,7 +170,9 @@ class VideoSequencingPipeline:
         window_size: float = 5.0,
         window_overlap: float = 0.5,
         encoder: str = 'videoprism',
-        openclip_model: str = 'ViT-B-32'
+        openclip_model: str = 'ViT-B-32',
+        num_frames: int = 16,
+        resolution: int = 288
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -231,7 +233,9 @@ class VideoSequencingPipeline:
                 videoprism_model,
                 use_windowing=use_windowing,
                 window_size=window_size,
-                window_overlap=window_overlap
+                window_overlap=window_overlap,
+                num_frames=num_frames,
+                resolution=resolution
             ):
                 return None
             
@@ -320,7 +324,9 @@ class VideoSequencingPipeline:
         model_name: str,
         use_windowing: bool = True,
         window_size: float = 5.0,
-        window_overlap: float = 0.5
+        window_overlap: float = 0.5,
+        num_frames: int = 16,
+        resolution: int = 288
     ) -> bool:
         """Index all videos in the video directory"""
         try:
@@ -379,12 +385,13 @@ class VideoSequencingPipeline:
                         
                         return True
             
-            # Create new index
             num_indexed = self.indexer.index_videos(
                 str(self.video_dir),
                 use_windowing=use_windowing,
                 window_size=window_size,
-                window_overlap=window_overlap
+                window_overlap=window_overlap,
+                num_frames=num_frames,
+                target_size=(resolution, resolution)
             )
             
             if num_indexed == 0:
@@ -800,6 +807,18 @@ Examples:
         help='Window overlap fraction for temporal sliding window (default: 0.5)'
     )
     parser.add_argument(
+        '--num-frames',
+        type=int,
+        default=16,
+        help='Number of frames to extract per video/window (default: 16)'
+    )
+    parser.add_argument(
+        '--resolution',
+        type=int,
+        default=288,
+        help='Target resolution (height/width) for VideoPrism. Must be multiple of 18. (default: 288)'
+    )
+    parser.add_argument(
         '--encoder',
         default='videoprism',
         choices=['videoprism', 'openclip'],
@@ -903,12 +922,15 @@ Examples:
         window_size=args.window_size,
         window_overlap=args.window_overlap,
         encoder=args.encoder,
-        openclip_model=args.openclip_model
+        openclip_model=args.openclip_model,
+        num_frames=args.num_frames,
+        resolution=args.resolution
     )
     
-    if output_video:
-        sys.exit(0)
+    if output_path:
+        logger.info(f"Done! Final output at: {output_path}")
     else:
+        logger.error("Pipeline failed.")
         sys.exit(1)
 
 

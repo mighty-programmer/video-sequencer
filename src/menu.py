@@ -306,6 +306,12 @@ def build_command(config: Dict) -> List[str]:
     if config.get('gpu_device'):
         cmd.extend(['--gpu-device', config['gpu_device']])
     
+    if config.get('num_frames'):
+        cmd.extend(['--num-frames', str(config['num_frames'])])
+    
+    if config.get('resolution'):
+        cmd.extend(['--resolution', str(config['resolution'])])
+        
     if config.get('verbose'):
         cmd.append('--verbose')
     
@@ -532,6 +538,11 @@ def screen_full_pipeline(config: Dict):
         config['window_overlap'] = float(get_input("Window overlap (0-1)", "0.5"))
     
     config['verbose'] = get_yes_no("Verbose output?", default=False)
+    
+    # Advanced indexing parameters
+    if get_yes_no("Configure advanced VideoPrism settings (frames/resolution)?", default=False):
+        config['num_frames'] = int(get_input("Number of frames (1-100)", "16"))
+        config['resolution'] = int(get_input("Resolution (must be multiple of 18, e.g., 288, 396)", "288"))
     
     cmd = build_command(config)
     run_command(cmd)
