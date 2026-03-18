@@ -80,6 +80,8 @@ class VideoPrismGridSearchConfig:
     model_name: str
     num_frames: int
     prompt_mode: str  # 'none', 'template:*', 'ensemble:template', 'ensemble:llm'
+    resolution: int
+    use_dual_softmax: bool
     prompt_template: Optional[str] = None
     ensemble_prompts: Optional[List[str]] = None
 
@@ -162,11 +164,9 @@ class _EnsembleVideoTextMatcher(VideoTextMatcher):
         """
         Get averaged embedding from multiple prompt variations.
         """
-        all_embeddings = []
-        for template in self.ensemble_templates:
-            prompted_text = template.format(text)
-            emb = super().get_text_embedding(prompted_text)
-            all_embeddings.append(emb)
+        # Use batch encoding for all templates at once
+        prompts = [template.format(text) for template in self.ensemble_templates]
+        all_embeddings = super().get_text_embeddings_batch(prompts)
         
         avg_embedding = np.mean(all_embeddings, axis=0)
         norm = np.linalg.norm(avg_embedding)
@@ -210,10 +210,8 @@ class _LLMEnsembleVideoTextMatcher(VideoTextMatcher):
         if len(prompts) <= 1:
             return super().get_text_embedding(text)
         
-        all_embeddings = []
-        for prompt in prompts:
-            emb = super().get_text_embedding(prompt)
-            all_embeddings.append(emb)
+        # Use batch encoding for all LLM prompts at once
+        all_embeddings = super().get_text_embeddings_batch(prompts)
         
         avg_embedding = np.mean(all_embeddings, axis=0)
         norm = np.linalg.norm(avg_embedding)
@@ -267,6 +265,9 @@ class VideoPrismGridSearch:
         self.window_size = window_size
         self.window_overlap = window_overlap
         
+        # Cache for VideoIndexer instances to avoid OOM by re-loading weights
+        self._indexer_cache = {}
+        
         # Load segments
         with open(segments_file, 'r') as f:
             segments_data = json.load(f)
@@ -300,6 +301,8 @@ class VideoPrismGridSearch:
         models: List[str] = None,
         num_frames_list: List[int] = None,
         prompt_modes: List[str] = None,
+        resolutions_list: List[int] = None,
+        use_dual_softmax_list: List[bool] = None,
         llm_model: str = None
     ) -> List[VideoPrismGridSearchConfig]:
         """
@@ -318,6 +321,10 @@ class VideoPrismGridSearch:
             models = ['videoprism_lvt_public_v1_large']
         if num_frames_list is None:
             num_frames_list = [8, 16, 32]
+        if resolutions_list is None:
+            resolutions_list = [288, 384]
+        if use_dual_softmax_list is None:
+            use_dual_softmax_list = [False, True]
         if prompt_modes is None:
             prompt_modes = ['none', 'template:video', 'template:photo',
                           'template:scene', 'template:cooking',
@@ -326,12 +333,14 @@ class VideoPrismGridSearch:
                 prompt_modes.append('ensemble:llm')
         
         configs = []
-        for model, num_frames, prompt_mode in itertools.product(
-            models, num_frames_list, prompt_modes
+        for model, num_frames, resolution, use_dual_softmax, prompt_mode in itertools.product(
+            models, num_frames_list, resolutions_list, use_dual_softmax_list, prompt_modes
         ):
             config = VideoPrismGridSearchConfig(
                 model_name=model,
                 num_frames=num_frames,
+                resolution=resolution,
+                use_dual_softmax=use_dual_softmax,
                 prompt_mode=prompt_mode
             )
             
@@ -384,10 +393,10 @@ class VideoPrismGridSearch:
         benchmarks get separate caches and stale indices are never loaded.
         """
         video_hash = hashlib.md5(self.video_dir.encode()).hexdigest()[:8]
-        # Cache key: video_hash + model + num_frames
-        # Prompt mode doesn't affect video indexing, only text encoding
+        # Cache key: video_hash + model + num_frames + resolution
+        # Prompt mode and dual softmax don't affect video indexing, only text encoding/matching
         cache_name = (
-            f"vp_{video_hash}_{config.model_name}_{config.num_frames}f"
+            f"vp_{video_hash}_{config.model_name}_{config.num_frames}f_{config.resolution}p"
         )
         return str(self.cache_base_dir / cache_name)
     
@@ -409,7 +418,7 @@ class VideoPrismGridSearch:
         # Short model name for display
         model_short = 'base' if 'base' in config.model_name else 'large'
         config_desc = (
-            f"VP-{model_short} | {config.num_frames}f | {config.prompt_mode}"
+            f"VP-{model_short} | {config.num_frames}f | {config.resolution}p | DualSM:{config.use_dual_softmax} | {config.prompt_mode}"
         )
         logger.info(f"\n{'='*60}")
         logger.info(f"Testing: {config_desc}")
@@ -421,17 +430,27 @@ class VideoPrismGridSearch:
             # 1. Create indexer and index videos
             cache_dir = self._get_cache_dir(config)
             
-            indexer = VideoIndexer(
-                model_name=config.model_name,
-                index_dir=cache_dir,
-                device=self.device
-            )
+            # Cache key based on model and resolution/frames (axes that affect the index)
+            cache_key = (config.model_name, config.num_frames, config.resolution)
             
-            # Override the default num_frames for frame extraction
+            if cache_key in self._indexer_cache:
+                indexer = self._indexer_cache[cache_key]
+                # Update index_dir just in case, though it should be consistent
+                indexer.index_dir = Path(cache_dir)
+                logger.info(f"Reusing cached VideoIndexer for {config.model_name} at {config.resolution}p")
+            else:
+                indexer = VideoIndexer(
+                    model_name=config.model_name,
+                    index_dir=cache_dir,
+                    device=self.device
+                )
+                self._indexer_cache[cache_key] = indexer
+            
+            # Override the default num_frames and resolution for frame extraction
             original_extract_frames = indexer.extract_frames
             
             def patched_extract_frames(video_path, num_frames=config.num_frames,
-                                       target_size=(288, 288), start_time=0.0, end_time=-1.0):
+                                       target_size=(config.resolution, config.resolution), start_time=0.0, end_time=-1.0):
                 return original_extract_frames(
                     video_path, num_frames=num_frames,
                     target_size=target_size, start_time=start_time, end_time=end_time
@@ -503,7 +522,9 @@ class VideoPrismGridSearch:
             
             # 4. Compute similarity matrix for evaluation
             similarity_matrix, all_metadata = matcher.compute_similarity_matrix(
-                self.segments, match_only=True
+                self.segments, 
+                match_only=True,
+                use_dual_softmax=config.use_dual_softmax
             )
             
             # 5. Evaluate against ground truth
@@ -550,6 +571,8 @@ class VideoPrismGridSearch:
         models: List[str] = None,
         num_frames_list: List[int] = None,
         prompt_modes: List[str] = None,
+        resolutions_list: List[int] = None,
+        use_dual_softmax_list: List[bool] = None,
         llm_model: str = None,
         quick: bool = False,
         reset_llm_cache: bool = False
@@ -572,6 +595,10 @@ class VideoPrismGridSearch:
                 models = ['videoprism_lvt_public_v1_large']
             if num_frames_list is None:
                 num_frames_list = [16]
+            if resolutions_list is None:
+                resolutions_list = [288]
+            if use_dual_softmax_list is None:
+                use_dual_softmax_list = [False, True]
             if prompt_modes is None:
                 prompt_modes = ['none', 'template:video', 'template:scene']
         
@@ -583,6 +610,8 @@ class VideoPrismGridSearch:
             models=models,
             num_frames_list=num_frames_list,
             prompt_modes=prompt_modes,
+            resolutions_list=resolutions_list,
+            use_dual_softmax_list=use_dual_softmax_list,
             llm_model=llm_model
         )
         
@@ -675,57 +704,61 @@ class VideoPrismGridSearch:
         lines.append("╠" + "═" * 90 + "╣")
         
         # Header
-        lines.append("║  RANK │ MODEL   │ FRAMES │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
-        lines.append("╟" + "─" * 90 + "╢")
+        lines.append("║  RANK │ MODEL   │ FRAMES │ RES  │ DUALSM │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
+        lines.append("╟" + "─" * 99 + "╢")
         
         # Results
         for i, result in enumerate(results_to_show):
             cfg = result.config
             model = 'base' if 'base' in cfg['model_name'] else 'large'
             frames = str(cfg['num_frames'])
+            res = str(cfg['resolution'])
+            dualsm = "Yes" if cfg['use_dual_softmax'] else "No"
             prompt = cfg['prompt_mode'][:18]
             
             marker = " ★" if i == 0 else "  "
             
-            lines.append(f"║{marker}{i+1:3d}  │ {model:<7} │ {frames:>6} │ {prompt:<18} │ "
+            lines.append(f"║{marker}{i+1:3d}  │ {model:<7} │ {frames:>6} │ {res:>4} │ {dualsm:<6} │ {prompt:<18} │ "
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ "
                   f"{result.top_5_accuracy:5.1f}% │ {result.mrr:.4f} ║")
         
         if limit is not None and len(self.results) > limit:
-            lines.append(f"║  ... and {len(self.results) - limit} more configurations" + " " * (90 - 40) + "║")
+            lines.append(f"║  ... and {len(self.results) - limit} more configurations" + " " * (99 - 40) + "║")
         
-        lines.append("╠" + "═" * 90 + "╣")
+        lines.append("╠" + "═" * 99 + "╣")
         
         # Best configuration
         if self.results:
             best = self.results[0]
             cfg = best.config
             model_display = 'base' if 'base' in cfg['model_name'] else 'large'
-            lines.append("║" + " " * 30 + "★ BEST CONFIGURATION ★" + " " * 38 + "║")
-            lines.append("╟" + "─" * 90 + "╢")
-            lines.append(f"║  Model:       VideoPrism LVT {model_display:<58} ║")
-            lines.append(f"║  Full name:   {cfg['model_name']:<74} ║")
-            lines.append(f"║  Frames:      {cfg['num_frames']:<74} ║")
-            lines.append(f"║  Prompt Mode: {cfg['prompt_mode']:<74} ║")
-            lines.append("╟" + "─" * 90 + "╢")
+            lines.append("║" + " " * 35 + "★ BEST CONFIGURATION ★" + " " * 42 + "║")
+            lines.append("╟" + "─" * 99 + "╢")
+            lines.append(f"║  Model:        VideoPrism LVT {model_display:<65} ║")
+            lines.append(f"║  Full name:    {cfg['model_name']:<81} ║")
+            lines.append(f"║  Frames:       {cfg['num_frames']:<81} ║")
+            lines.append(f"║  Resolution:   {cfg['resolution']:<81} ║")
+            lines.append(f"║  Dual Softmax: {cfg['use_dual_softmax']:<81} ║")
+            lines.append(f"║  Prompt Mode:  {cfg['prompt_mode']:<81} ║")
+            lines.append("╟" + "─" * 99 + "╢")
             lines.append(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
                   f"Top-3: {best.top_3_accuracy:.1f}%   │   "
                   f"Top-5: {best.top_5_accuracy:.1f}%   │   "
-                  f"MRR: {best.mrr:.4f}" + " " * 12 + "║")
+                  f"MRR: {best.mrr:.4f}" + " " * 21 + "║")
             
             # Generate CLI command for best config
-            lines.append("╟" + "─" * 90 + "╢")
-            lines.append("║  Run with best config:" + " " * 67 + "║")
+            lines.append("╟" + "─" * 99 + "╢")
+            lines.append("║  Run with best config:" + " " * 76 + "║")
             
             cmd = f"python src/main.py --encoder videoprism --videoprism-model {cfg['model_name']}"
             # Wrap long command
-            if len(cmd) > 86:
-                lines.append(f"║    {cmd[:86]} ║")
-                lines.append(f"║    {cmd[86:]:<86} ║")
+            if len(cmd) > 95:
+                lines.append(f"║    {cmd[:95]} ║")
+                lines.append(f"║    {cmd[95:]:<95} ║")
             else:
-                lines.append(f"║    {cmd:<86} ║")
+                lines.append(f"║    {cmd:<95} ║")
         
-        lines.append("╚" + "═" * 90 + "╝")
+        lines.append("╚" + "═" * 99 + "╝")
         return "\n".join(lines)
 
 
@@ -817,6 +850,10 @@ Examples:
                        help='Models to test')
     parser.add_argument('--frames', nargs='+', type=int, default=None,
                        help='Frame counts to test')
+    parser.add_argument('--resolutions', nargs='+', type=int, default=None,
+                       help='Resolutions to test (e.g., 288 384)')
+    parser.add_argument('--dual-softmax', nargs='+', type=lambda x: (str(x).lower() in ['true', '1', 'yes']), default=None,
+                       help='Whether to use dual softmax matching (e.g., true false)')
     parser.add_argument('--prompt-modes', nargs='+', default=None,
                        help='Prompt modes to test (e.g., none template:video ensemble:template ensemble:llm)')
     
@@ -881,6 +918,8 @@ Examples:
     results = searcher.run(
         models=args.models,
         num_frames_list=args.frames,
+        resolutions_list=args.resolutions,
+        use_dual_softmax_list=args.dual_softmax,
         prompt_modes=args.prompt_modes,
         llm_model=args.llm_model,
         quick=args.quick,
