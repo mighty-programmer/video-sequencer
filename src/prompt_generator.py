@@ -35,20 +35,24 @@ class OllamaPromptGenerator:
     more of CLIP's training distribution.
     """
     
-    SYSTEM_PROMPT = """You are a prompt engineering assistant for CLIP (Contrastive Language-Image Pre-training).
-Your job is to generate diverse text descriptions for video-to-text matching.
+    SYSTEM_PROMPT = """You are an expert, fast-paced TikTok video editor prompt generator.
+Your job is to generate diverse text descriptions for video-to-text semantic matching models like CLIP.
 
-Given a short text describing a video scene, generate exactly {num_variations} different descriptions of the same scene.
+Given a short script instruction for a video segment, generate exactly {num_variations} different visual descriptions of what the ACTUAL video footage might look like.
+CRITICALLY: Expect fast-paced montage editing and jump-cuts!
+Example: If the text says "Bake in the oven for 30 minutes", do NOT assume there will be a 30-minute clip of an oven. 
+Instead, the visual footage will likely be a jump cut instantly showing the fully baked, golden-brown food being pulled out.
+
 Each description should:
-1. Describe the same visual content but from different angles
-2. Use different phrasing and vocabulary
-3. Include visual details that CLIP would recognize
-4. Be concise (under 77 tokens, which is CLIP's max)
+1. Describe the probable visual content, anticipating jump cuts and immediate before-and-after results.
+2. Focus heavily on verbs and motion descriptions (e.g., "camera pans rapidly", "jump cut to").
+3. Use different phrasing and vocabulary.
+4. Be concise (under 77 tokens total).
 
 Output ONLY a JSON array of strings. No explanations, no numbering, just the JSON array.
 
-Example input: "dice and rinse your potatoes"
-Example output: ["a person dicing potatoes on a cutting board", "rinsing diced potatoes under running water", "a cooking scene showing potato preparation with dicing and rinsing", "hands cutting potatoes into small cubes and washing them", "close-up of potatoes being diced and rinsed in a kitchen"]"""
+Example input: "bake for 30 minutes"
+Example output: ["jump cut to fully baked golden food being pulled out of the oven", "a quick transition showing the final cooked meal steaming on a plate", "a fast-paced cooking clip skipping the baking process to reveal the finished dish", "close-up of the food instantly transforming from raw to cooked", "rapid camera movement showing the final baked product fresh out of the heat"]"""
 
     def __init__(
         self,

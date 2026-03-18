@@ -100,6 +100,23 @@ class VideoTextMatcher:
         
         logger.info("VideoTextMatcher initialized successfully")
     
+    def _init_jit_functions(self):
+        """Initialize JIT-compiled functions for better performance."""
+        import jax
+        
+        # We define the forward_fn once and store it
+        def forward_text_fn(variables, text_ids, text_paddings):
+            _, text_embeddings, _ = self.flax_model.apply(
+                variables,
+                None,  # video_inputs = None
+                text_ids,
+                text_paddings,
+                train=False
+            )
+            return text_embeddings
+            
+        self._jit_forward_text_fn = jax.jit(forward_text_fn)
+
     def get_text_embedding(self, text: str) -> np.ndarray:
         """
         Get GLOBAL embedding for a text query using LVT model.
@@ -110,24 +127,24 @@ class VideoTextMatcher:
         Returns:
             Embedding array with shape (feature_channels,) - typically (768,)
         """
-        import jax
+        return self.get_text_embeddings_batch([text])[0]
+
+    def get_text_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        """
+        Get GLOBAL embeddings for a batch of text queries.
         
-        text_ids, text_paddings = vp.tokenize_texts(self.text_tokenizer, [text])
-        
-        @jax.jit
-        def forward_fn(text_ids, text_paddings):
-            # For LVT model: pass None for video to get only text embeddings
-            _, text_embeddings, _ = self.flax_model.apply(
-                self.loaded_state,
-                None,  # video_inputs = None
-                text_ids,
-                text_paddings,
-                train=False
-            )
-            return text_embeddings
-        
-        text_embeddings = forward_fn(text_ids, text_paddings)
-        return np.array(text_embeddings[0])  # Shape: (768,)
+        Args:
+            texts: List of text strings
+            
+        Returns:
+            Embeddings array with shape (batch_size, feature_channels)
+        """
+        if not hasattr(self, '_jit_forward_text_fn'):
+            self._init_jit_functions()
+            
+        text_ids, text_paddings = vp.tokenize_texts(self.text_tokenizer, texts)
+        text_embeddings = self._jit_forward_text_fn(self.loaded_state, text_ids, text_paddings)
+        return np.array(text_embeddings)
     
     def get_num_indexed_videos(self) -> int:
         """Get the number of indexed videos."""
@@ -144,7 +161,9 @@ class VideoTextMatcher:
     def compute_similarity_matrix(
         self,
         script_segments: List[Dict],
-        match_only: bool = False
+        match_only: bool = False,
+        use_dual_softmax: bool = False,
+        temperature: float = 0.05
     ) -> Tuple[np.ndarray, List]:
         """
         Compute the full similarity matrix between all segments and all videos.
@@ -152,6 +171,8 @@ class VideoTextMatcher:
         Args:
             script_segments: List of segment dictionaries with 'text' and 'duration'
             match_only: If True, use only raw cosine similarity
+            use_dual_softmax: If True, applies dual softmax scaling over the matrix
+            temperature: Temperature scaling factor for the softmax
             
         Returns:
             Tuple of (similarity_matrix, all_metadata)
@@ -167,12 +188,9 @@ class VideoTextMatcher:
         
         logger.info(f"Computing similarity matrix: {num_segments} segments x {num_videos} videos")
         
-        # Get all text embeddings
-        text_embeddings = []
-        for segment in script_segments:
-            emb = self.get_text_embedding(segment['text'])
-            text_embeddings.append(emb)
-        text_embeddings = np.array(text_embeddings)
+        # Get all text embeddings in one batch for better performance
+        texts = [segment['text'] for segment in script_segments]
+        text_embeddings = self.get_text_embeddings_batch(texts)
         
         # Normalize text embeddings for cosine similarity
         text_norms = np.linalg.norm(text_embeddings, axis=1, keepdims=True)
@@ -212,6 +230,17 @@ class VideoTextMatcher:
                     )
                     similarity_matrix[seg_idx, vid_idx] = combined_score
         
+        if use_dual_softmax:
+            import scipy.special
+            # Apply dual softmax scaled by temperature
+            scaled_matrix = similarity_matrix / temperature
+            # Softmax over rows (videos per segment)
+            prob_v_given_s = scipy.special.softmax(scaled_matrix, axis=1)
+            # Softmax over columns (segments per video)
+            prob_s_given_v = scipy.special.softmax(scaled_matrix, axis=0)
+            # Multiply them together to find mutually agreeable pairs
+            similarity_matrix = prob_v_given_s * prob_s_given_v
+            
         return similarity_matrix, all_metadata
     
     def match_segment_to_videos(
