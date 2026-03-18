@@ -636,6 +636,10 @@ class MultiModalKeywordIndexer:
             self.inverted_index = defaultdict(list, data['inverted_index'])
             self.idf_scores = data['idf_scores']
             
+            if not self.video_entries:
+                logger.warning("Loaded keyword index is empty. Re-indexing required.")
+                return False
+                
             logger.info(f"Loaded keyword index: {len(self.video_entries)} videos, "
                         f"{len(self.inverted_index)} keywords")
             return True

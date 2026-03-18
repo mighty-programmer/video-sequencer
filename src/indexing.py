@@ -530,8 +530,14 @@ class VideoIndexer:
         logger.info(f"Loaded FAISS index from {index_path}")
         
         self.metadata_list = [
-            VideoMetadata(**m) for m in data['metadata']
+            VideoMetadata(**m) if isinstance(m, dict) else m 
+            for m in data['metadata']
         ]
+        
+        if not self.metadata_list:
+            logger.warning("Loaded VideoPrism index is empty. Re-indexing required.")
+            return False
+            
         self.video_id_to_idx = data['video_id_to_idx']
         
         logger.info(f"Loaded metadata for {len(self.metadata_list)} entries")

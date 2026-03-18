@@ -609,6 +609,10 @@ class OpenCLIPVideoIndexer:
         self.metadata_list = [VideoMetadata(**m) for m in data['metadata']]
         self.video_id_to_idx = data['video_id_to_idx']
         
+        if not self.metadata_list:
+            logger.warning("Loaded OpenCLIP index is empty. Re-indexing required.")
+            return False
+            
         # Load frame embeddings if available
         frame_emb_path = self.index_dir / 'frame_embeddings.npz'
         if frame_emb_path.exists():
