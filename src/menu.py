@@ -996,7 +996,8 @@ def screen_benchmark_upload(config: Dict):
     print(f"  {Colors.DIM}    ├── clip_002.mp4{Colors.END}")
     print(f"  {Colors.DIM}    └── ...{Colors.END}")
 
-    base_dir = Path(config.get('benchmarks_dir', './data/benchmarks'))
+    project_dir = Path(__file__).parent.parent
+    base_dir = project_dir / 'data' / 'benchmarks'
 
     # Determine next available benchmark number
     existing = discover_benchmark_numbers(str(base_dir))
