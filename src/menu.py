@@ -128,15 +128,17 @@ def browse_file(prompt: str, default: str = None, extensions: List[str] = None) 
     return path
 
 
-def discover_benchmark_numbers(base_dir: str = './data/benchmarks') -> List[Dict]:
+def discover_benchmark_numbers(base_dir: str = None) -> List[Dict]:
     """
     Auto-discover available benchmarks by scanning the videos directory
     for folders matching the pattern 'video_*'.
-    
+
     Returns a list of benchmark dicts with number, paths, and status info.
     The benchmark number is extracted from the video folder name.
     Segments and ground truth paths are derived from the number.
     """
+    if base_dir is None:
+        base_dir = Path(__file__).parent.parent / 'data' / 'benchmarks'
     benchmarks = []
     base = Path(base_dir)
     videos_dir = base / 'videos'
@@ -345,10 +347,17 @@ def screen_compare_all_models(config: dict):
     print_header()
     print_title("Compare All Models (Parallel Grid Search)")
     
-    # Prompt for Benchmark Number
+    # Prompt for Benchmark Number — discover range dynamically
     print(f"  {Colors.DIM}This tool runs 3 parallel background sessions to test every combination possible.{Colors.END}")
     print(f"  {Colors.DIM}It creates isolated cache environments and generates identical LLM prompts. {Colors.END}")
-    benchmark = get_input("\nEnter Benchmark Number (1-6)", "6")
+    _discovered = discover_benchmark_numbers()
+    if _discovered:
+        bm_hint = f"{_discovered[0]['number']}-{_discovered[-1]['number']}"
+        bm_default = _discovered[-1]['number']
+    else:
+        bm_hint = "e.g. 7"
+        bm_default = "7"
+    benchmark = get_input(f"\nEnter Benchmark Number ({bm_hint})", bm_default)
     
     # Check what Ollama model to use
     print_menu("\nLLM for Shared Prompt Generation", [

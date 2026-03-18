@@ -322,7 +322,7 @@ class VideoPrismGridSearch:
         if num_frames_list is None:
             num_frames_list = [8, 16, 32]
         if resolutions_list is None:
-            resolutions_list = [288, 384]
+            resolutions_list = [288, 396]
         if use_dual_softmax_list is None:
             use_dual_softmax_list = [False, True]
         if prompt_modes is None:
@@ -461,12 +461,14 @@ class VideoPrismGridSearch:
             # Try to load cached index
             t_index_start = time.time()
             if not indexer.load_index():
-                indexer.index_videos(
+                num_indexed = indexer.index_videos(
                     self.video_dir,
                     use_windowing=self.use_windowing,
                     window_size=self.window_size,
                     window_overlap=self.window_overlap
                 )
+                if num_indexed == 0:
+                    raise RuntimeError(f"Failed to index any videos! Check JAX shape constraints (must be multiple of 18) or OOM limits for {config.resolution}p.")
             else:
                 logger.info(f"Loaded cached index: {len(indexer.metadata_list)} entries")
             indexing_time = time.time() - t_index_start
