@@ -805,7 +805,87 @@ def create_sequence(
             script_segments, video_matcher, match_only, allow_reuse
         )
 
+
+
+# ---------------------------------------------------------------------------
+# Prompt-engineering subclasses (shared by main.py and grid_search.py)
+# ---------------------------------------------------------------------------
+
+# Standard prompt templates used by EnsembleVideoTextMatcher
+DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES: List[str] = [
+    '{}',
+    'a video of {}',
+    'a photo of {}',
+    'a scene showing {}',
+    'a short clip of {}',
+]
+
+
+class PromptedVideoTextMatcher(VideoTextMatcher):
+    """
+    VideoTextMatcher that applies a single prompt template before encoding.
+
+    E.g. ``'a video of {}'`` wraps the raw segment text before tokenisation.
+    """
+
+    def __init__(
+        self,
+        video_indexer,
+        model_name: str = 'videoprism_lvt_public_v1_base',
+        device: str = 'gpu',
+        min_similarity_threshold: float = 0.0,
+        prompt_template: Optional[str] = None
+    ):
+        super().__init__(
+            video_indexer=video_indexer,
+            model_name=model_name,
+            device=device,
+            min_similarity_threshold=min_similarity_threshold
+        )
+        self.prompt_template = prompt_template
+
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        if self.prompt_template:
+            text = self.prompt_template.format(text)
+        return super().get_text_embedding(text)
+
+
+class EnsembleVideoTextMatcher(VideoTextMatcher):
+    """
+    VideoTextMatcher that averages embeddings over a fixed set of prompt templates.
+
+    E.g. encodes ``'a video of X'``, ``'a photo of X'``, etc. and averages them
+    into a single normalised query vector.
+    """
+
+    def __init__(
+        self,
+        video_indexer,
+        model_name: str = 'videoprism_lvt_public_v1_base',
+        device: str = 'gpu',
+        min_similarity_threshold: float = 0.0,
+        ensemble_templates: Optional[List[str]] = None
+    ):
+        super().__init__(
+            video_indexer=video_indexer,
+            model_name=model_name,
+            device=device,
+            min_similarity_threshold=min_similarity_threshold
+        )
+        self.ensemble_templates = ensemble_templates or DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
+
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        prompts = [t.format(text) for t in self.ensemble_templates]
+        all_embeddings = super().get_text_embeddings_batch(prompts)
+        avg = np.mean(all_embeddings, axis=0)
+        norm = np.linalg.norm(avg)
+        if norm > 0:
+            avg = avg / norm
+        return avg.astype(np.float32)
+
+
 class LLMEnsembleVideoTextMatcher(VideoTextMatcher):
+
     """
     VideoTextMatcher that uses per-segment LLM-generated prompt variations.
     

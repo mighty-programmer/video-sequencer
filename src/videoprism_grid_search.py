@@ -46,7 +46,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 
 from indexing import VideoIndexer
-from matching import VideoTextMatcher, create_sequence, ClipSelection
+from matching import (
+    VideoTextMatcher, create_sequence, ClipSelection,
+    PromptedVideoTextMatcher, EnsembleVideoTextMatcher, LLMEnsembleVideoTextMatcher,
+    DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
+)
 from benchmark import BenchmarkEvaluator, BenchmarkResults
 from prompt_generator import create_ensemble_templates
 
@@ -100,124 +104,10 @@ class VideoPrismGridSearchResult:
     total_time: float
 
 
-class _PromptedVideoTextMatcher(VideoTextMatcher):
-    """
-    Extended VideoTextMatcher that applies a prompt template to text before encoding.
-    
-    VideoPrism's default behavior passes raw text directly to the tokenizer.
-    This wrapper applies a template (e.g., "a video of {text}") before tokenization
-    to test whether prompt engineering improves matching accuracy.
-    """
-    
-    def __init__(
-        self,
-        video_indexer,
-        model_name: str = 'videoprism_lvt_public_v1_base',
-        device: str = 'gpu',
-        min_similarity_threshold: float = 0.0,
-        prompt_template: Optional[str] = None
-    ):
-        super().__init__(
-            video_indexer=video_indexer,
-            model_name=model_name,
-            device=device,
-            min_similarity_threshold=min_similarity_threshold
-        )
-        self.prompt_template = prompt_template
-    
-    def get_text_embedding(self, text: str) -> np.ndarray:
-        """
-        Get embedding for text, applying a prompt template first.
-        """
-        if self.prompt_template:
-            prompted_text = self.prompt_template.format(text)
-        else:
-            prompted_text = text
-        return super().get_text_embedding(prompted_text)
-
-
-class _EnsembleVideoTextMatcher(VideoTextMatcher):
-    """
-    VideoTextMatcher that encodes multiple prompt variations and averages embeddings.
-    
-    For ensemble:template mode, applies a fixed set of templates to each segment text.
-    The resulting embeddings are averaged and normalized to produce a single query vector.
-    """
-    
-    def __init__(
-        self,
-        video_indexer,
-        model_name: str = 'videoprism_lvt_public_v1_base',
-        device: str = 'gpu',
-        min_similarity_threshold: float = 0.0,
-        ensemble_templates: Optional[List[str]] = None
-    ):
-        super().__init__(
-            video_indexer=video_indexer,
-            model_name=model_name,
-            device=device,
-            min_similarity_threshold=min_similarity_threshold
-        )
-        self.ensemble_templates = ensemble_templates or DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
-    
-    def get_text_embedding(self, text: str) -> np.ndarray:
-        """
-        Get averaged embedding from multiple prompt variations.
-        """
-        # Use batch encoding for all templates at once
-        prompts = [template.format(text) for template in self.ensemble_templates]
-        all_embeddings = super().get_text_embeddings_batch(prompts)
-        
-        avg_embedding = np.mean(all_embeddings, axis=0)
-        norm = np.linalg.norm(avg_embedding)
-        if norm > 0:
-            avg_embedding = avg_embedding / norm
-        return avg_embedding.astype(np.float32)
-
-
-class _LLMEnsembleVideoTextMatcher(VideoTextMatcher):
-    """
-    VideoTextMatcher that uses per-segment LLM-generated prompt variations.
-    
-    Instead of using the same templates for all segments, this uses unique
-    LLM-generated descriptions per segment text. The LLM produces diverse
-    paraphrases and visual descriptions that are encoded and averaged.
-    """
-    
-    def __init__(
-        self,
-        video_indexer,
-        model_name: str = 'videoprism_lvt_public_v1_base',
-        device: str = 'gpu',
-        min_similarity_threshold: float = 0.0,
-        llm_prompts: Optional[Dict[str, List[str]]] = None
-    ):
-        super().__init__(
-            video_indexer=video_indexer,
-            model_name=model_name,
-            device=device,
-            min_similarity_threshold=min_similarity_threshold
-        )
-        self.llm_prompts = llm_prompts or {}
-    
-    def get_text_embedding(self, text: str) -> np.ndarray:
-        """
-        Get averaged embedding using LLM-generated prompts specific to this text.
-        Falls back to raw text if no LLM prompts are available.
-        """
-        prompts = self.llm_prompts.get(text, [text])
-        
-        if len(prompts) <= 1:
-            return super().get_text_embedding(text)
-        
-        # Use batch encoding for all LLM prompts at once
-        all_embeddings = super().get_text_embeddings_batch(prompts)
-        
-        avg_embedding = np.mean(all_embeddings, axis=0)
-        norm = np.linalg.norm(avg_embedding)
-        if norm > 0:
-            avg_embedding = avg_embedding / norm
-        return avg_embedding.astype(np.float32)
+# Matcher subclasses are defined in matching.py and imported above.
+# _PromptedVideoTextMatcher  -> PromptedVideoTextMatcher
+# _EnsembleVideoTextMatcher  -> EnsembleVideoTextMatcher
+# _LLMEnsembleVideoTextMatcher -> LLMEnsembleVideoTextMatcher
 
 
 class VideoPrismGridSearch:
@@ -476,7 +366,7 @@ class VideoPrismGridSearch:
             # 2. Create matcher based on prompt mode
             if config.prompt_mode == 'ensemble:llm' and llm_prompts:
                 # LLM ensemble: per-segment unique prompts
-                matcher = _LLMEnsembleVideoTextMatcher(
+                matcher = LLMEnsembleVideoTextMatcher(
                     video_indexer=indexer,
                     model_name=config.model_name,
                     device=self.device,
@@ -485,7 +375,7 @@ class VideoPrismGridSearch:
                 )
             elif config.prompt_mode == 'ensemble:template':
                 # Template ensemble: same set of templates for all segments
-                matcher = _EnsembleVideoTextMatcher(
+                matcher = EnsembleVideoTextMatcher(
                     video_indexer=indexer,
                     model_name=config.model_name,
                     device=self.device,
@@ -494,7 +384,7 @@ class VideoPrismGridSearch:
                 )
             elif config.prompt_template:
                 # Single template: wrap text before encoding
-                matcher = _PromptedVideoTextMatcher(
+                matcher = PromptedVideoTextMatcher(
                     video_indexer=indexer,
                     model_name=config.model_name,
                     device=self.device,
