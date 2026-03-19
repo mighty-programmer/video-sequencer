@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Optional, List
 
 # Matching module (no JAX dependency)
-from matching import VideoTextMatcher, create_sequence, ClipSelection
+from matching import VideoTextMatcher, LLMEnsembleVideoTextMatcher, create_sequence, ClipSelection
+from prompt_generator import create_ensemble_templates
 
 # VideoPrism-dependent imports (require JAX)
 try:
@@ -167,6 +168,7 @@ class VideoSequencingPipeline:
         use_optimal: bool = True,
         use_dual_softmax: bool = False,
         dual_softmax_temp: float = 0.05,
+        prompt_mode: str = 'none',
         ground_truth_file: str = None,
         use_windowing: bool = True,
         window_size: float = 5.0,
@@ -261,6 +263,26 @@ class VideoSequencingPipeline:
                 if segments is None:
                     return None
             
+            llm_prompts = None
+            if prompt_mode == 'ensemble:llm':
+                logger.info(f"\n[STEP 3.5] Generating LLM visual prompts using {llm_model}...")
+                cache_file = self.cache_dir / 'llm_prompts_cache.json'
+                segment_dicts = [
+                    {
+                        'text': seg.text,
+                        'duration': seg.duration,
+                        'start_time': seg.start_time,
+                        'end_time': seg.end_time
+                    }
+                    for seg in segments
+                ]
+                llm_prompts = create_ensemble_templates(
+                    segment_dicts,
+                    llm_model=llm_model,
+                    num_variations=5,
+                    cache_file=str(cache_file)
+                )
+
             # Step 4: Match segments to videos
             logger.info("\n[STEP 4] Matching script segments to video clips...")
             clip_selections = self._match_and_sequence(
@@ -268,7 +290,11 @@ class VideoSequencingPipeline:
                 match_only=match_only, 
                 allow_reuse=allow_reuse,
                 use_optimal=use_optimal,
-                ground_truth_file=ground_truth_file
+                use_dual_softmax=use_dual_softmax,
+                dual_softmax_temp=dual_softmax_temp,
+                ground_truth_file=ground_truth_file,
+                prompt_mode=prompt_mode,
+                llm_prompts=llm_prompts
             )
             if clip_selections is None:
                 return None
@@ -488,7 +514,11 @@ class VideoSequencingPipeline:
         match_only: bool = False,
         allow_reuse: bool = True,
         use_optimal: bool = True,
-        ground_truth_file: str = None
+        use_dual_softmax: bool = False,
+        dual_softmax_temp: float = 0.05,
+        ground_truth_file: str = None,
+        prompt_mode: str = 'none',
+        llm_prompts: Optional[Dict[str, List[str]]] = None
     ):
         """Match script segments to video clips"""
         try:
@@ -498,7 +528,12 @@ class VideoSequencingPipeline:
             if self._encoder == 'openclip':
                 self.matcher = OpenCLIPTextMatcher(self.indexer)
             else:
-                self.matcher = VideoTextMatcher(self.indexer)
+                if prompt_mode == 'ensemble:llm':
+                    self.matcher = LLMEnsembleVideoTextMatcher(
+                        self.indexer, llm_prompts=llm_prompts
+                    )
+                else:
+                    self.matcher = VideoTextMatcher(self.indexer)
             
             # Convert segments to dict format expected by create_sequence
             segment_dicts = [
@@ -814,6 +849,12 @@ Examples:
         default='ViT-B-32',
         choices=['ViT-B-32', 'ViT-B-16', 'ViT-L-14'],
         help='OpenCLIP model to use when --encoder openclip is selected (default: ViT-B-32)'
+    )
+    parser.add_argument(
+        '--prompt-mode',
+        default='none',
+        choices=['none', 'ensemble:llm'],
+        help='Mode for text prompt engineering (default: none)'
     )
     parser.add_argument(
         '--use-dual-softmax',

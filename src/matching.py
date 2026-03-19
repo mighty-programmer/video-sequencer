@@ -804,3 +804,47 @@ def create_sequence(
         return create_sequence_greedy(
             script_segments, video_matcher, match_only, allow_reuse
         )
+
+class LLMEnsembleVideoTextMatcher(VideoTextMatcher):
+    """
+    VideoTextMatcher that uses per-segment LLM-generated prompt variations.
+    
+    Instead of using the same templates for all segments, this uses unique
+    LLM-generated descriptions per segment text. The LLM produces diverse
+    paraphrases and visual descriptions that are encoded and averaged.
+    """
+    
+    def __init__(
+        self,
+        video_indexer,
+        model_name: str = 'videoprism_lvt_public_v1_base',
+        device: str = 'gpu',
+        min_similarity_threshold: float = 0.0,
+        llm_prompts: Optional[Dict[str, List[str]]] = None
+    ):
+        super().__init__(
+            video_indexer=video_indexer,
+            model_name=model_name,
+            device=device,
+            min_similarity_threshold=min_similarity_threshold
+        )
+        self.llm_prompts = llm_prompts or {}
+    
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        """
+        Get averaged embedding using LLM-generated prompts specific to this text.
+        Falls back to raw text if no LLM prompts are available.
+        """
+        prompts = self.llm_prompts.get(text, [text])
+        
+        if len(prompts) <= 1:
+            return super().get_text_embedding(text)
+        
+        # Use batch encoding for all LLM prompts at once
+        all_embeddings = super().get_text_embeddings_batch(prompts)
+        
+        avg_embedding = np.mean(all_embeddings, axis=0)
+        norm = np.linalg.norm(avg_embedding)
+        if norm > 0:
+            avg_embedding = avg_embedding / norm
+        return avg_embedding.astype(np.float32)
