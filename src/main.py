@@ -165,6 +165,8 @@ class VideoSequencingPipeline:
         match_only: bool = False,
         allow_reuse: bool = True,
         use_optimal: bool = True,
+        use_dual_softmax: bool = False,
+        dual_softmax_temp: float = 0.05,
         ground_truth_file: str = None,
         use_windowing: bool = True,
         window_size: float = 5.0,
@@ -515,7 +517,9 @@ class VideoSequencingPipeline:
             if ground_truth_file:
                 logger.info("Computing full similarity matrix for benchmark evaluation...")
                 similarity_matrix, all_metadata = self.matcher.compute_similarity_matrix(
-                    segment_dicts, match_only=match_only
+                    segment_dicts, match_only=match_only,
+                    use_dual_softmax=use_dual_softmax,
+                    temperature=dual_softmax_temp
                 )
             
             # Create sequence
@@ -812,6 +816,17 @@ Examples:
         help='OpenCLIP model to use when --encoder openclip is selected (default: ViT-B-32)'
     )
     parser.add_argument(
+        '--use-dual-softmax',
+        action='store_true',
+        help='Apply dual softmax scaling to the similarity matrix for better globally-aware matching'
+    )
+    parser.add_argument(
+        '--dual-softmax-temp',
+        type=float,
+        default=0.05,
+        help='Temperature scaling factor for dual softmax (default: 0.05)'
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -898,6 +913,8 @@ Examples:
         match_only=args.match_only,
         allow_reuse=args.allow_reuse,
         use_optimal=args.use_optimal,
+        use_dual_softmax=args.use_dual_softmax,
+        dual_softmax_temp=args.dual_softmax_temp,
         ground_truth_file=args.ground_truth,
         use_windowing=not args.no_windowing,
         window_size=args.window_size,
