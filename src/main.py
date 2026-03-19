@@ -18,7 +18,7 @@ import json
 import sys
 import shutil
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 # Matching module (no JAX dependency)
 from matching import VideoTextMatcher, LLMEnsembleVideoTextMatcher, create_sequence, ClipSelection
