@@ -352,12 +352,12 @@ def screen_compare_all_models(config: dict):
     print(f"  {Colors.DIM}It creates isolated cache environments and generates identical LLM prompts. {Colors.END}")
     _discovered = discover_benchmark_numbers()
     if _discovered:
-        bm_hint = f"{_discovered[0]['number']}-{_discovered[-1]['number']}"
-        bm_default = _discovered[-1]['number']
+        bm_hint = f"comma-separated e.g. {_discovered[0]['number']},{_discovered[-1]['number']} or 'all'"
+        bm_default = "all"
     else:
-        bm_hint = "e.g. 7"
-        bm_default = "7"
-    benchmark = get_input(f"\nEnter Benchmark Number ({bm_hint})", bm_default)
+        bm_hint = "e.g. 6,7 or 'all'"
+        bm_default = "all"
+    benchmark = get_input(f"\nEnter Benchmark Number(s) ({bm_hint})", bm_default)
     
     # Check what Ollama model to use
     print_menu("\nLLM for Shared Prompt Generation", [
@@ -380,7 +380,7 @@ def screen_compare_all_models(config: dict):
     gpu_device = get_input("\nGPU device(s) (comma-separated for multi-gpu, e.g., cuda:0,cuda:1)", config.get('gpu_device', 'cuda:0'))
     disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
     
-    output_dir = get_input("Base Output Directory", f"./output/comparison_b{benchmark}")
+    output_dir = get_input("Base Output Directory", f"./output/comparison_multi")
     
     # Build orchestrator command
     cmd = ['python', 'src/compare_all_models.py']
