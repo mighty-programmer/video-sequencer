@@ -34,6 +34,14 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+This now includes the lightweight web stack used by the browser editor:
+
+- `fastapi`
+- `uvicorn`
+- `python-multipart`
+- `open_clip_torch`
+- `scikit-learn`
+
 ### 4. Install JAX with CUDA Support
 
 For NVIDIA GPUs with CUDA 12:
@@ -138,3 +146,11 @@ If you don't have sudo access, most Python packages can still be installed in yo
 ## Next Steps
 
 Once installation is complete, see the main [README.md](README.md) for usage instructions.
+
+### Start the Web App
+
+```bash
+python3 src/webapp.py
+```
+
+Open `http://<server-host>:8000` in your browser to use the web editor and the web versions of the benchmark/cache/pipeline tools.

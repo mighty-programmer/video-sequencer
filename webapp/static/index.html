@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Sequencer Studio</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Write-A-Video Inspired Web Studio</p>
+          <h1>Video Sequencer Studio</h1>
+          <p class="hero-copy">
+            Edit script segments, inspect candidate shots, preview assembly decisions,
+            and run the rest of the project’s pipeline tools from one browser workspace.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button class="primary" id="refreshAll">Refresh Data</button>
+          <a class="ghost" href="/api/cache" target="_blank" rel="noreferrer">Cache JSON</a>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="editor">Editor</button>
+        <button class="tab" data-tab="pipeline">Pipeline</button>
+        <button class="tab" data-tab="benchmarks">Benchmarks</button>
+        <button class="tab" data-tab="operations">Operations</button>
+      </nav>
+
+      <main>
+        <section class="tab-panel active" id="tab-editor">
+          <div class="launch-card">
+            <div class="section-label">Session Setup</div>
+            <div class="launch-grid">
+              <label>
+                Session Name
+                <input id="sessionName" type="text" placeholder="thesis-edit-session" />
+              </label>
+              <label>
+                Benchmark
+                <select id="sessionBenchmark">
+                  <option value="">Custom Paths</option>
+                </select>
+              </label>
+              <label>
+                Retrieval Mode
+                <select id="sessionMode">
+                  <option value="writeavideo">Write-A-Video</option>
+                  <option value="openclip">OpenCLIP</option>
+                  <option value="videoprism">VideoPrism</option>
+                </select>
+              </label>
+              <label>
+                OpenCLIP Model
+                <select id="sessionOpenclipModel">
+                  <option value="ViT-B-32">ViT-B-32</option>
+                  <option value="ViT-B-16">ViT-B-16</option>
+                  <option value="ViT-L-14">ViT-L-14</option>
+                </select>
+              </label>
+              <label class="wide">
+                Custom Video Directory
+                <input id="sessionVideoDir" type="text" placeholder="./data/benchmarks/videos/video_2" />
+              </label>
+              <label class="wide">
+                Audio File
+                <input id="sessionAudio" type="text" placeholder="./data/benchmarks/audio/voiceover_2.mp3" />
+              </label>
+              <label class="wide">
+                Manual Segments File
+                <input id="sessionSegments" type="text" placeholder="./examples/example_segments.json" />
+              </label>
+              <label>
+                Candidate Pool
+                <input id="sessionPool" type="number" min="3" max="30" value="10" />
+              </label>
+              <label>
+                Keyword Weight
+                <input id="sessionKeywordWeight" type="number" step="0.05" min="0" max="1" value="0.2" />
+              </label>
+              <label class="toggle">
+                <input id="sessionSimpleSegmentation" type="checkbox" />
+                Use Simple Segmentation
+              </label>
+              <label class="toggle">
+                <input id="sessionObjects" type="checkbox" checked />
+                Enable Object Detection
+              </label>
+              <label class="toggle">
+                <input id="sessionFaces" type="checkbox" />
+                Enable Face Clustering
+              </label>
+            </div>
+            <div class="launch-actions">
+              <button class="primary" id="createSession">Create Editing Session</button>
+              <button class="ghost" id="refreshSessions">Reload Sessions</button>
+            </div>
+            <div class="status" id="editorStatus"></div>
+          </div>
+
+          <div class="saved-sessions card">
+            <div class="section-label">Saved Sessions</div>
+            <div id="sessionList" class="stack compact"></div>
+          </div>
+
+          <div id="editorWorkspace" class="workspace hidden">
+            <div class="panel text-panel">
+              <div class="section-label">Text Editor</div>
+              <div id="segmentList" class="stack"></div>
+            </div>
+
+            <div class="panel candidates-panel">
+              <div class="section-label">Candidates</div>
+              <div class="panel-toolbar">
+                <button class="ghost" id="regenerateAll">Refresh All Candidates</button>
+              </div>
+              <div id="candidateGrid" class="candidate-grid"></div>
+            </div>
+
+            <div class="panel preview-panel">
+              <div class="section-label">Preview</div>
+              <video id="previewVideo" controls playsinline></video>
+              <div id="previewCaption" class="muted">Select a segment to inspect its chosen shot.</div>
+
+              <div class="editor-form">
+                <h3 id="segmentEditorTitle">Segment Controls</h3>
+                <label>
+                  Text
+                  <textarea id="segmentText" rows="8"></textarea>
+                </label>
+                <label>
+                  Visual Keywords
+                  <input id="segmentKeywords" type="text" placeholder="comma,separated,keywords" />
+                </label>
+                <div class="pill-row" id="keywordSuggestions"></div>
+                <div class="idioms">
+                  <button class="idiom" data-movement="auto">Auto</button>
+                  <button class="idiom" data-movement="more">More Movement</button>
+                  <button class="idiom" data-movement="less">Less Movement</button>
+                </div>
+                <label>
+                  Shot Duration Bias
+                  <input id="durationMultiplier" type="range" min="0.4" max="2.2" step="0.05" value="1.0" />
+                  <span id="durationMultiplierValue">1.00x</span>
+                </label>
+                <label>
+                  Split Timing Bias
+                  <input id="timingBias" type="range" min="-1" max="1" step="0.05" value="0" />
+                  <span id="timingBiasValue">0.00</span>
+                </label>
+                <div class="editor-actions">
+                  <button class="primary" id="saveSegment">Save Segment Settings</button>
+                  <button class="ghost" id="regenerateSegment">Refresh Segment</button>
+                  <button class="ghost" id="splitSegment">Split</button>
+                  <button class="ghost" id="mergeSegment">Merge Next</button>
+                  <button class="ghost" id="moveSegmentUp">Move Up</button>
+                  <button class="ghost" id="moveSegmentDown">Move Down</button>
+                </div>
+              </div>
+
+              <div class="panel-toolbar">
+                <button class="primary" id="assembleSession">Render Sequence</button>
+                <button class="ghost" id="exportSegments">Export Segments JSON</button>
+              </div>
+
+              <div class="assembled-card">
+                <h3>Rendered Output</h3>
+                <video id="assembledVideo" controls playsinline></video>
+                <p id="assembledStatus" class="muted">No rendered output yet.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-pipeline">
+          <div class="pipeline-grid">
+            <div class="card">
+              <div class="section-label">Quick Benchmark</div>
+              <div class="stack compact">
+                <label>Benchmark <select id="quickBenchmark"></select></label>
+                <label>Encoder
+                  <select id="quickEncoder">
+                    <option value="videoprism">VideoPrism</option>
+                    <option value="openclip">OpenCLIP</option>
+                  </select>
+                </label>
+                <label>OpenCLIP Model
+                  <select id="quickOpenclipModel">
+                    <option value="ViT-B-32">ViT-B-32</option>
+                    <option value="ViT-B-16">ViT-B-16</option>
+                    <option value="ViT-L-14">ViT-L-14</option>
+                  </select>
+                </label>
+                <label class="toggle"><input id="quickVerbose" type="checkbox" checked />Verbose Output</label>
+                <button class="primary" data-job-action="quick-benchmark">Run Quick Benchmark</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">Full Pipeline</div>
+              <div class="stack compact">
+                <label>Benchmark <select id="fullBenchmark"></select></label>
+                <label>Video Directory <input id="fullVideoDir" type="text" placeholder="./data/videos" /></label>
+                <label>Audio File <input id="fullAudio" type="text" placeholder="./data/audio/voiceover.mp3" /></label>
+                <label>Segments File <input id="fullSegments" type="text" placeholder="./examples/example_segments.json" /></label>
+                <label>Encoder
+                  <select id="fullEncoder">
+                    <option value="videoprism">VideoPrism</option>
+                    <option value="openclip">OpenCLIP</option>
+                  </select>
+                </label>
+                <label class="toggle"><input id="fullNoReuse" type="checkbox" />Prevent Reuse</label>
+                <label class="toggle"><input id="fullGreedy" type="checkbox" />Use Greedy Matching</label>
+                <label class="toggle"><input id="fullNoWindowing" type="checkbox" checked />Disable Windowing</label>
+                <button class="primary" data-job-action="full-pipeline">Run Full Pipeline</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">OpenCLIP Grid Search</div>
+              <div class="stack compact">
+                <label>Benchmark <select id="openclipGridBenchmark"></select></label>
+                <label>Prompt Modes <input id="openclipGridPrompts" type="text" value="none,template:video,template:photo,template:cooking,template:scene" /></label>
+                <label>Frames <input id="openclipGridFrames" type="text" value="4,8,16,32" /></label>
+                <label>Aggregations <input id="openclipGridAggregations" type="text" value="mean,max,best_frame" /></label>
+                <button class="primary" data-job-action="openclip-grid-search">Run OpenCLIP Grid Search</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">VideoPrism Grid Search</div>
+              <div class="stack compact">
+                <label>Benchmark <select id="videoprismGridBenchmark"></select></label>
+                <label>Prompt Modes <input id="videoprismGridPrompts" type="text" value="none,template:video,template:photo,template:scene,template:cooking" /></label>
+                <label>Frames <input id="videoprismGridFrames" type="text" value="8,16,32" /></label>
+                <button class="primary" data-job-action="videoprism-grid-search">Run VideoPrism Grid Search</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">Write-A-Video Grid Search</div>
+              <div class="stack compact">
+                <label>Benchmark <select id="wavGridBenchmark"></select></label>
+                <label>Pool Sizes <input id="wavGridPools" type="text" value="5,10,20" /></label>
+                <label>Keyword Weights <input id="wavGridKeywordWeights" type="text" value="0.0,0.1,0.2,0.3" /></label>
+                <label>Prompt Modes <input id="wavGridPrompts" type="text" value="none,template:video,template:photo,template:cooking,template:scene,ensemble:template" /></label>
+                <button class="primary" data-job-action="write-a-video-grid-search">Run Write-A-Video Grid Search</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">Compare All Models</div>
+              <div class="stack compact">
+                <label>Benchmark(s) <input id="compareBenchmark" type="text" value="all" /></label>
+                <label>LLM Model <input id="compareLLM" type="text" value="llama3.2:3b" /></label>
+                <button class="primary" data-job-action="compare-all-models">Run Comparison</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-benchmarks">
+          <div class="two-column">
+            <div class="card">
+              <div class="section-label">Upload Benchmark</div>
+              <div class="stack compact">
+                <label>Benchmark Number <input id="uploadBenchmarkNumber" type="text" placeholder="7" /></label>
+                <label>Benchmark Title <input id="uploadBenchmarkTitle" type="text" placeholder="London Travel Edit" /></label>
+                <label>
+                  Flat Folder Upload
+                  <input id="uploadBenchmarkFiles" type="file" webkitdirectory directory multiple />
+                </label>
+                <button class="primary" id="uploadBenchmarkButton">Upload Folder</button>
+              </div>
+              <div class="status" id="benchmarkUploadStatus"></div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">Benchmarks</div>
+              <div id="benchmarkList" class="stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-operations">
+          <div class="two-column">
+            <div class="card">
+              <div class="section-label">Settings</div>
+              <div class="stack compact">
+                <label>GPU Device <input id="settingGpu" type="text" /></label>
+                <label>Default Output <input id="settingOutput" type="text" /></label>
+                <label>Cache Directory <input id="settingCache" type="text" /></label>
+                <label>Benchmarks Directory <input id="settingBenchmarksDir" type="text" /></label>
+                <label>Server Hostname <input id="settingHostname" type="text" /></label>
+                <button class="primary" id="saveSettings">Save Settings</button>
+              </div>
+              <div class="status" id="settingsStatus"></div>
+            </div>
+
+            <div class="card">
+              <div class="section-label">Cache Management</div>
+              <div class="cache-actions">
+                <button class="ghost cache-action" data-cache-action="videoprism-index">Clear VideoPrism Index</button>
+                <button class="ghost cache-action" data-cache-action="openclip-index">Clear OpenCLIP Index</button>
+                <button class="ghost cache-action" data-cache-action="openclip-grid">Clear OpenCLIP Grid Cache</button>
+                <button class="ghost cache-action" data-cache-action="videoprism-grid">Clear VideoPrism Grid Cache</button>
+                <button class="ghost cache-action" data-cache-action="write-a-video-grid">Clear Write-A-Video Cache</button>
+                <button class="primary cache-action" data-cache-action="all">Clear All Cache</button>
+              </div>
+              <div id="cacheList" class="stack compact"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-label">Jobs & Logs</div>
+            <div id="jobList" class="stack compact"></div>
+            <pre id="jobLog" class="job-log">Job logs will appear here.</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

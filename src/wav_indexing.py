@@ -28,6 +28,7 @@ import json
 import logging
 import hashlib
 import math
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass, asdict, field
@@ -862,13 +863,101 @@ class WriteAVideoMatcher:
         used_videos=None,
         match_only: bool = False
     ) -> List[Dict]:
-        """Find best matching video clips using two-stage retrieval."""
-        # Delegate to text_matcher for compatibility
-        return self.text_matcher.match_segment_to_videos(
-            segment_text, segment_duration, k=k,
-            allow_reuse=allow_reuse, used_videos=used_videos,
-            match_only=match_only
+        """
+        Find best matching video clips using the two-stage Write-A-Video flow.
+
+        Stage 1 retrieves a candidate pool from the keyword index, and Stage 2
+        reranks that pool with OpenCLIP semantic similarity. When the keyword
+        stage yields too few results, we backfill from the semantic index so the
+        caller still gets a usable candidate list for interactive editing.
+        """
+        if used_videos is None:
+            used_videos = set()
+
+        keyword_results = self.keyword_indexer.search_keywords(
+            segment_text,
+            top_k=max(self.candidate_pool_size, k * 2)
         )
+
+        text_embedding = self.get_text_embedding(segment_text)
+        all_metadata = self.openclip_indexer.metadata_list
+        metadata_by_id = {meta.video_id: meta for meta in all_metadata}
+
+        semantic_scores = {}
+        if self.openclip_indexer.aggregation == 'best_frame':
+            for metadata in all_metadata:
+                semantic_scores[metadata.video_id] = self.openclip_indexer.search_best_frame(
+                    text_embedding, metadata.video_id
+                )
+        else:
+            results = self.openclip_indexer.search_by_embedding(
+                text_embedding,
+                k=len(all_metadata)
+            )
+            semantic_scores = {video_id: score for video_id, score, _ in results}
+
+        candidate_rows = []
+        max_keyword_score = max((score for _, score in keyword_results), default=1.0)
+        query_keywords = set(re.findall(r'\b[a-z]{3,}\b', segment_text.lower()))
+
+        for kw_idx, keyword_score in keyword_results[:self.candidate_pool_size]:
+            entry = self.keyword_indexer.video_entries[kw_idx]
+            metadata = metadata_by_id.get(entry.video_id)
+            if metadata is None:
+                continue
+            if not allow_reuse and entry.video_id in used_videos:
+                continue
+
+            similarity = semantic_scores.get(entry.video_id, -1.0)
+            similarity_score = (similarity + 1.0) / 2.0
+            normalized_keyword_score = keyword_score / max(max_keyword_score, 1e-8)
+            motion_score = self.text_matcher._calculate_motion_score(metadata, segment_duration)
+            context_score = self.text_matcher._calculate_context_score(segment_text, metadata)
+
+            if match_only:
+                combined_score = similarity
+            else:
+                semantic_blend = (1 - self.keyword_weight) * similarity_score + self.keyword_weight * normalized_keyword_score
+                combined_score = (
+                    0.65 * semantic_blend +
+                    0.2 * motion_score +
+                    0.15 * context_score
+                )
+
+            candidate_rows.append({
+                'video_id': entry.video_id,
+                'file_path': metadata.file_path,
+                'duration': metadata.duration,
+                'similarity': similarity,
+                'similarity_score': similarity_score,
+                'motion_score': motion_score,
+                'context_score': context_score,
+                'keyword_score': normalized_keyword_score,
+                'combined_score': combined_score,
+                'matched_keywords': sorted(query_keywords & set(entry.all_keywords)),
+                'is_reused': entry.video_id in used_videos,
+            })
+
+        if len(candidate_rows) < k:
+            fallback = self.text_matcher.match_segment_to_videos(
+                segment_text,
+                segment_duration,
+                k=max(k, self.candidate_pool_size),
+                allow_reuse=allow_reuse,
+                used_videos=used_videos,
+                match_only=match_only
+            )
+            existing_ids = {row['video_id'] for row in candidate_rows}
+            for candidate in fallback:
+                if candidate['video_id'] in existing_ids:
+                    continue
+                candidate.setdefault('keyword_score', 0.0)
+                candidate.setdefault('matched_keywords', [])
+                candidate_rows.append(candidate)
+                existing_ids.add(candidate['video_id'])
+
+        candidate_rows.sort(key=lambda row: row['combined_score'], reverse=True)
+        return candidate_rows[:k]
     
     def select_best_clip(self, candidates, segment_duration, match_only=False):
         """Select the best clip from candidates."""

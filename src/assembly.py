@@ -10,6 +10,7 @@ This module is responsible for:
 """
 
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
@@ -495,7 +496,7 @@ class VideoSequenceBuilder:
     def build_sequence(
         self,
         clip_selections: List,
-        audio_path: str,
+        audio_path: Optional[str],
         output_path: str,
         use_speed_control: bool = True
     ) -> bool:
@@ -504,7 +505,7 @@ class VideoSequenceBuilder:
         
         Args:
             clip_selections: List of ClipSelection objects
-            audio_path: Path to voice-over audio
+            audio_path: Optional path to voice-over audio
             output_path: Path to output video
             use_speed_control: If True, adjust clip speed to match segment duration
         
@@ -553,13 +554,17 @@ class VideoSequenceBuilder:
                 logger.error("Failed to concatenate clips")
                 return False
             
-            # Step 3: Add audio
-            success = self.assembler.add_audio(
-                str(concatenated_path),
-                audio_path,
-                output_path
-            )
-            
+            # Step 3: Add audio when available, otherwise export the silent cut.
+            if audio_path:
+                success = self.assembler.add_audio(
+                    str(concatenated_path),
+                    audio_path,
+                    output_path
+                )
+            else:
+                shutil.copy2(str(concatenated_path), output_path)
+                success = True
+
             if success:
                 logger.info(f"Successfully built video sequence: {output_path}")
                 self._cleanup_temp_files()

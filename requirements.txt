@@ -17,6 +17,7 @@ imageio>=2.9.0
 # Run: pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 torch>=2.0.0
 torchvision>=0.15.0
+open_clip_torch>=2.24.0
 
 # Transformer Models and Utilities
 transformers>=4.30.0
@@ -30,15 +31,25 @@ openai-whisper>=20230314
 
 # Vector Search
 faiss-cpu>=1.7.0
+scikit-learn>=1.3.0
 
 # CLI Framework
 typer>=0.4.0
 click>=8.0.0
 
+# Web App
+fastapi>=0.111.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+
 # Utilities
 tqdm>=4.62.0
 pydantic>=1.9.0
 pyyaml>=5.4.0
+
+# Optional Write-A-Video keyword indexing extras
+# ultralytics>=8.2.0
+# deepface>=0.0.92
 
 # Note: VideoPrism must be installed separately from source
 # Clone: git clone https://github.com/google-deepmind/videoprism.git

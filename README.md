@@ -11,6 +11,7 @@ This project is a comprehensive system that automates the process of video editi
 - **Optimal Clip Sequencing**: Creates a timeline of video clips, handling trimming and reuse to best fit the narrative.
 - **Automated Video Assembly**: Assembles the final video by cutting and concatenating the selected clips and adding the voice-over audio.
 - **Command-Line Interface**: A user-friendly CLI for easy control and integration into workflows.
+- **Web Editing Studio**: A browser-based, Write-A-Video-inspired editor for segment editing, candidate review, preview, render, benchmark management, cache management, and pipeline job launching.
 
 ## System Architecture
 
@@ -89,6 +90,35 @@ python main.py --video-dir ./data/videos --audio ./data/voiceover.mp3 --output .
 ```bash
 python main.py --video-dir ./data/videos --audio ./data/voiceover.mp3 --output ./output --whisper-model medium --llm-model google/gemma-2b-it --gpu-device cuda:1
 ```
+
+### Web Application
+
+The repository now includes a browser-based web app that mirrors the paper-inspired editing workflow and also exposes the existing menu-driven project operations.
+
+Start the server from the repository root:
+
+```bash
+python3 src/webapp.py
+```
+
+Then open:
+
+```text
+http://<server-host>:8000
+```
+
+The web app includes four major areas:
+
+- **Editor**: A Write-A-Video-style workspace with a text editor, candidate shot panel, preview panel, keyword suggestions, and segment idiom controls.
+- **Pipeline**: Web forms for Quick Benchmark, Full Pipeline, OpenCLIP Grid Search, VideoPrism Grid Search, Write-A-Video Grid Search, and Compare All Models.
+- **Benchmarks**: Benchmark upload, download, deletion, and direct handoff into the editor.
+- **Operations**: Settings, cache management, background job monitoring, and logs.
+
+#### Editor Notes
+
+- `writeavideo` mode uses the repo's two-stage retrieval stack: keyword filtering plus OpenCLIP reranking.
+- Segment controls support keyword overrides, movement preference, shot-duration bias, split-timing bias, split/merge, candidate refresh, and render.
+- Rendering now works with or without a voice-over file, which makes silent previews possible during editing.
 
 ## License
 

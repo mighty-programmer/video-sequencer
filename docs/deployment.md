@@ -95,6 +95,25 @@ Once the project is uploaded, you can run the application from your Ubuntu serve
 
     Make sure to replace the paths with the actual locations of your video directory, audio file, and desired output directory.
 
+5.  **Run the web application (recommended for editing):**
+
+    ```bash
+    python3 src/webapp.py
+    ```
+
+    The web server binds to `0.0.0.0:8000` by default, so you can open:
+
+    ```text
+    http://your_server_ip:8000
+    ```
+
+    This gives you:
+
+    - the Write-A-Video-inspired editing frontend
+    - pipeline launch forms for the existing CLI workflows
+    - benchmark upload/download/delete tools
+    - settings, cache management, and background job logs
+
 ## 4. Uploading Test Video Clips
 
 To upload your test video clips and voice-over audio, you can also use the `scp` command.

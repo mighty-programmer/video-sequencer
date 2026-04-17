@@ -143,3 +143,4 @@ temp/
 *.safetensors
 models/
 .staging/
+webapp/state/
