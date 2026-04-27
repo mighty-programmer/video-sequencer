@@ -1271,7 +1271,52 @@ class EditorSessionManager:
                 rank=1
             )
             
-            seg.candidates = [candidate]
+            candidate_list = [candidate]
+            pool_size = runtime.session.candidate_pool_size
+            
+            if pool_size > 1:
+                raw_matches = runtime.matcher.match_segment_to_videos(
+                    script_segments[seg.segment_id]['text'],
+                    script_segments[seg.segment_id]['duration'],
+                    k=pool_size + 1,
+                    allow_reuse=True,
+                    match_only=True
+                )
+                
+                rank = 2
+                for rm in raw_matches:
+                    if rm["video_id"] == selection.video_id:
+                        continue
+                    if len(candidate_list) >= pool_size:
+                        break
+                        
+                    rm_trim_start, rm_trim_end = self._candidate_trim_times(runtime.matcher, rm, script_segments[seg.segment_id]['duration'])
+                    rm_motion_score = self._measure_motion(runtime, rm["file_path"], rm_trim_start, rm_trim_end)
+                    rm_matched_keywords = self._matched_keywords(runtime, seg, rm)
+                    rm_thumb = self._ensure_thumbnail(runtime, rm["file_path"], rm_trim_start, rm_trim_end, rank)
+                    
+                    alt_candidate = EditorCandidate(
+                        candidate_id=f"{seg.segment_id}:{rank}:{rm['video_id']}",
+                        video_id=rm["video_id"],
+                        file_path=rm["file_path"],
+                        file_name=Path(rm["file_path"]).name,
+                        duration=float(rm["duration"]),
+                        similarity_score=float(rm.get("similarity_score", rm.get("similarity", 0.0))),
+                        combined_score=float(rm.get("similarity_score", rm.get("similarity", 0.0))),
+                        motion_score=float(rm_motion_score),
+                        context_score=0.0,
+                        keyword_score=0.0,
+                        trim_start=float(rm_trim_start),
+                        trim_end=float(rm_trim_end),
+                        trim_duration=float(rm_trim_end - rm_trim_start),
+                        matched_keywords=rm_matched_keywords,
+                        thumbnail_path=rm_thumb,
+                        rank=rank
+                    )
+                    candidate_list.append(alt_candidate)
+                    rank += 1
+            
+            seg.candidates = candidate_list
             seg.selected_candidate_id = candidate.candidate_id
 
     def _regenerate_segment_candidates(self, runtime: EditorRuntime, segment_id: int) -> None:
