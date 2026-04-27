@@ -13,6 +13,7 @@ This application automatically generates edited videos by:
 """
 
 import argparse
+import inspect
 import logging
 import json
 import sys
@@ -568,10 +569,15 @@ class VideoSequencingPipeline:
             all_metadata = None
             if ground_truth_file:
                 logger.info("Computing full similarity matrix for benchmark evaluation...")
+                matrix_kwargs = {"match_only": match_only}
+                matrix_signature = inspect.signature(self.matcher.compute_similarity_matrix)
+                if "use_dual_softmax" in matrix_signature.parameters:
+                    matrix_kwargs["use_dual_softmax"] = use_dual_softmax
+                if "temperature" in matrix_signature.parameters:
+                    matrix_kwargs["temperature"] = dual_softmax_temp
                 similarity_matrix, all_metadata = self.matcher.compute_similarity_matrix(
-                    segment_dicts, match_only=match_only,
-                    use_dual_softmax=use_dual_softmax,
-                    temperature=dual_softmax_temp
+                    segment_dicts,
+                    **matrix_kwargs,
                 )
             
             # Create sequence
