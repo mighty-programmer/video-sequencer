@@ -96,4 +96,6 @@ Validated on `neghvar.ced.tuc.gr` on 2026-04-27:
 - Confirmed benchmark-backed editor sessions open correctly through the live web UI.
 - Confirmed `openclip` editor sessions preserve benchmark-authored timings in the text editor.
 - Reproduced the live `writeavideo` session-creation failure from both HTTP requests and the browser UI before applying the progress-bar fix.
-- Reconnected to the server over SSH after the VPN interruption to continue deployment and verification work.
+- Confirmed fresh `writeavideo` sessions can be created successfully through both the HTTP API and the browser UI after the fix.
+- Confirmed save/edit actions still work on a fresh `writeavideo` session after creation.
+- Confirmed assembled render output is produced successfully for a fresh `writeavideo` session on the remote server.
