@@ -238,6 +238,7 @@ function renderSessions() {
       </div>
       <div class="launch-actions">
         <button class="ghost" data-open-session="${session.session_id}">Open</button>
+        <button class="danger" data-delete-session="${session.session_id}">Delete</button>
       </div>
     `;
     list.appendChild(node);
@@ -250,6 +251,18 @@ function renderSessions() {
       state.activeSegmentId = session.segments[0]?.segment_id ?? null;
       renderEditor();
       switchTab("editor");
+    });
+  });
+
+  list.querySelectorAll("[data-delete-session]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Are you sure you want to delete this session?")) return;
+      try {
+        await api(`/api/editor/sessions/${button.dataset.deleteSession}`, { method: "DELETE" });
+        await refreshBootstrap();
+      } catch (error) {
+        setStatus("editorStatus", error.message, true);
+      }
     });
   });
 }

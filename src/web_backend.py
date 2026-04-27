@@ -877,6 +877,19 @@ class EditorSessionManager:
         runtime = self._get_runtime(session_id)
         return self._serialize_session(runtime.session)
 
+    def delete_session(self, session_id: str) -> None:
+        import shutil
+        with self._lock:
+            # Drop from memory
+            if session_id in self._runtimes:
+                del self._runtimes[session_id]
+                
+        # Delete from disk
+        session_dir = self.sessions_dir / session_id
+        if session_dir.exists() and session_dir.is_dir():
+            shutil.rmtree(session_dir)
+
+
     def update_segment(self, session_id: str, segment_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
         runtime = self._get_runtime(session_id)
         with runtime.lock:

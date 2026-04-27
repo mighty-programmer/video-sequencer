@@ -202,6 +202,14 @@ def get_session(session_id: str) -> Dict[str, Any]:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unknown session.") from exc
 
+@app.delete("/api/editor/sessions/{session_id}")
+def delete_session(session_id: str) -> Dict[str, Any]:
+    try:
+        editor_manager.delete_session(session_id)
+        return {"result": "ok"}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown session.") from exc
+
 
 @app.post("/api/editor/sessions/{session_id}/regenerate")
 def regenerate_all(session_id: str) -> Dict[str, Any]:
