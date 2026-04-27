@@ -733,6 +733,16 @@ async function exportSegments() {
   window.open(`/api/editor/sessions/${state.currentSession.session_id}/segments/export`, "_blank");
 }
 
+async function downloadVideo() {
+  if (!state.currentSession || !state.currentSession.assembled_video_path) {
+    alert("No rendered video available to download yet.");
+    return;
+  }
+  const path = state.currentSession.assembled_video_path;
+  const name = state.currentSession.name.replace(/\s+/g, "_") + ".mp4";
+  window.open(`/api/media?path=${encodeURIComponent(path)}&download=true&filename=${encodeURIComponent(name)}`, "_blank");
+}
+
 function bindEvents() {
   document.querySelectorAll(".tab").forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
@@ -748,6 +758,7 @@ function bindEvents() {
   $("mergeSegment").addEventListener("click", () => sessionAction(`/api/editor/sessions/${state.currentSession.session_id}/segments/${state.activeSegmentId}/merge`, "Merging segment..."));
   $("assembleSession").addEventListener("click", () => sessionAction(`/api/editor/sessions/${state.currentSession.session_id}/assemble`, "Rendering video sequence..."));
   $("exportSegments").addEventListener("click", exportSegments);
+  $("downloadVideo").addEventListener("click", downloadVideo);
   $("moveSegmentUp").addEventListener("click", () => moveSegment("up"));
   $("moveSegmentDown").addEventListener("click", () => moveSegment("down"));
   $("uploadBenchmarkButton").addEventListener("click", uploadBenchmark);

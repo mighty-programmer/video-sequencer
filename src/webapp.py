@@ -61,7 +61,7 @@ def bootstrap() -> Dict[str, Any]:
 
 
 @app.get("/api/media")
-def media(path: str) -> FileResponse:
+def media(path: str, download: bool = False, filename: Optional[str] = None) -> FileResponse:
     file_path = Path(path)
     if not file_path.is_absolute():
         file_path = (PROJECT_ROOT / file_path).resolve()
@@ -69,7 +69,13 @@ def media(path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="File not found.")
     if file_path.suffix.lower() not in SAFE_MEDIA_EXTENSIONS:
         raise HTTPException(status_code=403, detail="Unsupported media type.")
-    return FileResponse(file_path)
+    
+    headers = {}
+    if download:
+        dl_name = filename or file_path.name
+        headers["Content-Disposition"] = f'attachment; filename="{dl_name}"'
+        
+    return FileResponse(file_path, headers=headers)
 
 
 @app.get("/api/settings")
