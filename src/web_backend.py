@@ -215,6 +215,7 @@ class EditorSegment:
     duration_multiplier: float = 1.0
     timing_bias: float = 0.0
     selected_candidate_id: Optional[str] = None
+    ground_truth_clip: Optional[str] = None
     candidates: List[EditorCandidate] = field(default_factory=list)
 
 
@@ -820,6 +821,7 @@ class EditorSessionManager:
         segments = self._load_segments(
             audio_file=audio_file,
             segments_file=segments_file,
+            ground_truth_file=_resolve_path(payload.get("ground_truth") or resolved.get("ground_truth")),
             cache_dir=cache_dir,
             whisper_model=payload.get("whisper_model") or settings.get("whisper_model", "base"),
             llm_model=payload.get("llm_model") or settings.get("llm_model", "meta-llama/Llama-3.2-3B-Instruct"),
@@ -1160,15 +1162,34 @@ class EditorSessionManager:
         self,
         audio_file: Optional[str],
         segments_file: Optional[str],
+        ground_truth_file: Optional[str],
         cache_dir: Path,
         whisper_model: str,
         llm_model: str,
         gpu_device: str,
         use_simple_segmentation: bool,
     ) -> List[EditorSegment]:
+        gt_mapping = {}
+        if ground_truth_file:
+            try:
+                with open(ground_truth_file, "r", encoding="utf-8") as f:
+                    gt_data = json.load(f)
+                    for mapping in gt_data.get("mappings", []):
+                        idx = mapping.get("segment_id", mapping.get("index"))
+                        if idx is not None:
+                            gt_mapping[int(idx)] = mapping.get("clip", mapping.get("video"))
+            except Exception as e:
+                logger.error(f"Error loading ground truth during session creation: {e}")
+
+        def apply_gt(segments: List[EditorSegment]):
+            for seg in segments:
+                if seg.segment_id in gt_mapping:
+                    seg.ground_truth_clip = gt_mapping[seg.segment_id]
+            return segments
+
         if segments_file:
             raw_segments = load_manual_segments(segments_file)
-            return [self._segment_from_script_segment(segment) for segment in raw_segments]
+            return apply_gt([self._segment_from_script_segment(segment) for segment in raw_segments])
 
         if not audio_file:
             raise ValueError("Either a segments file or an audio file is required.")
@@ -1178,7 +1199,7 @@ class EditorSessionManager:
 
         if segments_cache.exists():
             loaded = ScriptSegmenter.load_segments(str(segments_cache))
-            return [self._segment_from_script_segment(segment) for segment in loaded]
+            return apply_gt([self._segment_from_script_segment(segment) for segment in loaded])
 
         if transcription_cache.exists():
             with open(transcription_cache, "r", encoding="utf-8") as handle:
@@ -1210,7 +1231,7 @@ class EditorSessionManager:
         ]
         scripted = segmenter.segment_script(transcription.full_text, words_with_timing)
         segmenter.save_segments(scripted, str(segments_cache))
-        return [self._segment_from_script_segment(segment) for segment in scripted]
+        return apply_gt([self._segment_from_script_segment(segment) for segment in scripted])
 
     def _segment_from_script_segment(self, segment: ScriptSegment) -> EditorSegment:
         return EditorSegment(

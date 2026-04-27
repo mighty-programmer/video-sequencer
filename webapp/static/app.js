@@ -364,12 +364,32 @@ function renderEditor() {
     assembledStatus.textContent = "No rendered output yet.";
   }
 
-  let sequenceScoreTotal = 0;
+  let exactMatches = 0;
+  let totalSegmentsWithGT = 0;
+
   segments.forEach((s) => {
     const sel = s.candidates.find((c) => c.candidate_id === s.selected_candidate_id) || s.candidates[0];
-    if (sel) sequenceScoreTotal += (sel.combined_score || 0);
+    if (s.ground_truth_clip) {
+      totalSegmentsWithGT++;
+      if (sel) {
+        const predStem = sel.file_name.split(".")[0].toLowerCase().trim();
+        const gtStem = s.ground_truth_clip.split(".")[0].toLowerCase().trim();
+        if (predStem === gtStem) {
+          exactMatches++;
+        }
+      }
+    }
   });
-  $("sequenceScore").textContent = `Sequence Score: ${sequenceScoreTotal.toFixed(3)}`;
+
+  const accuracy = totalSegmentsWithGT > 0 ? (exactMatches / totalSegmentsWithGT) * 100 : null;
+  const scoreBadge = $("sequenceScore");
+  if (accuracy !== null) {
+    scoreBadge.textContent = `Accuracy: ${accuracy.toFixed(1)}%`;
+    scoreBadge.style.background = accuracy >= 80 ? "var(--green)" : accuracy >= 50 ? "var(--orange)" : "var(--red)";
+    scoreBadge.classList.remove("hidden");
+  } else {
+    scoreBadge.classList.add("hidden");
+  }
 
   const candidateGrid = $("candidateGrid");
   candidateGrid.innerHTML = "";
