@@ -87,6 +87,7 @@ This follow-up release fixes issues that only appeared once the web studio was e
 - Disabled terminal-only progress bars for web-server indexing requests, which removes a `Broken pipe` failure mode seen when creating fresh `writeavideo` sessions on the remote server.
 - Added per-session `create_session_error.log` output under `webapp/state/sessions/<session_id>/` so server-side initialization failures leave an inspectable traceback.
 - Applied the same non-interactive progress handling to VideoPrism, OpenCLIP, and Write-A-Video indexing paths to keep the web deployment stable across retrieval modes.
+- Added built-in server controls to the `Operations` tab, including live server status, a one-click restart action, a stop action, and the exact restart command for SSH recovery.
 
 ### Remote validation
 
@@ -99,3 +100,4 @@ Validated on `neghvar.ced.tuc.gr` on 2026-04-27:
 - Confirmed fresh `writeavideo` sessions can be created successfully through both the HTTP API and the browser UI after the fix.
 - Confirmed save/edit actions still work on a fresh `writeavideo` session after creation.
 - Confirmed assembled render output is produced successfully for a fresh `writeavideo` session on the remote server.
+- Confirmed the new in-app `Restart Server` control successfully restarts the live Uvicorn process and reconnects the UI.
