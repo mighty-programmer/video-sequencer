@@ -172,6 +172,7 @@ class WebJob:
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     returncode: Optional[int] = None
+    pid: Optional[int] = None
     log_lines: List[str] = field(default_factory=list)
 
     def snapshot(self) -> Dict[str, Any]:
@@ -581,6 +582,9 @@ class JobManager:
             bufsize=1,
         )
 
+        with self._lock:
+            self._jobs[job_id].pid = process.pid
+
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -639,7 +643,7 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
     if action == "quick-benchmark":
         resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
         command = [
-            "python", "src/main.py",
+            sys.executable, "-u", "src/main.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--output", output_dir,
@@ -666,7 +670,7 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         video_dir = payload.get("video_dir") or resolved.get("video_dir")
         audio = payload.get("audio") or resolved.get("audio")
         command = [
-            "python", "src/main.py",
+            sys.executable, "-u", "src/main.py",
             "--video-dir", video_dir,
             "--output", output_dir,
             "--gpu-device", gpu_device,
