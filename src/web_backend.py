@@ -42,6 +42,15 @@ from matching import ClipSelection, VideoTextMatcher
 from menu import discover_benchmark_numbers
 from models import VideoMetadata
 from openclip_indexing import OpenCLIPTextMatcher, OpenCLIPVideoIndexer
+from server_runtime import (
+    SERVER_LOG_FILE,
+    SERVER_PORT,
+    clear_server_state,
+    get_project_root,
+    get_server_status,
+    server_command,
+    write_server_state,
+)
 from segmentation import ScriptSegment, ScriptSegmenter
 from transcription import TranscriptionResult, VoiceTranscriber, WordSegment
 from wav_indexing import MultiModalKeywordIndexer, WriteAVideoMatcher
@@ -61,8 +70,6 @@ WEBAPP_ROOT = PROJECT_ROOT / "webapp"
 STATE_ROOT = WEBAPP_ROOT / "state"
 SESSIONS_ROOT = STATE_ROOT / "sessions"
 SETTINGS_FILE = STATE_ROOT / "settings.json"
-SERVER_LOG_FILE = STATE_ROOT / "server.log"
-SERVER_PORT = 8000
 
 STATE_ROOT.mkdir(parents=True, exist_ok=True)
 SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -83,6 +90,7 @@ DEFAULT_SETTINGS = {
     "output": "./output",
     "cache_dir": "./cache",
     "server_hostname": "neghvar.ced.tuc.gr",
+    "server_python": sys.executable,
     "benchmarks_dir": "./data/benchmarks",
     "editor_mode": "writeavideo",
     "openclip_model": "ViT-B-32",
@@ -272,23 +280,36 @@ class SettingsStore:
 
 class ServerControlManager:
     def __init__(self, log_file: Path = SERVER_LOG_FILE, port: int = SERVER_PORT) -> None:
-        self.working_dir = Path(os.environ.get("PWD", str(PROJECT_ROOT)))
+        self.working_dir = get_project_root()
         self.log_file = Path(os.environ.get("VIDEO_SEQUENCER_SERVER_LOG", str(log_file)))
         self.port = port
 
     def status(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         hostname = (settings or {}).get("server_hostname", "localhost")
-        return {
-            "running": True,
-            "pid": os.getpid(),
-            "port": self.port,
-            "hostname": hostname,
-            "url": f"http://{hostname}:{self.port}/",
-            "project_root": str(self.working_dir),
-            "log_file": str(self.log_file),
-            "python_executable": sys.executable,
-            "restart_command": f"cd {self.working_dir} && {sys.executable} src/webapp.py",
-        }
+        python_executable = (settings or {}).get("server_python") or sys.executable
+        return get_server_status(
+            hostname=hostname,
+            python_executable=python_executable,
+            project_root=self.working_dir,
+            log_file=self.log_file,
+            port=self.port,
+        )
+
+    def register_current_process(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self.working_dir = get_project_root()
+        python_executable = (settings or {}).get("server_python") or sys.executable
+        write_server_state(
+            pid=os.getpid(),
+            project_root=self.working_dir,
+            python_executable=python_executable,
+            log_file=self.log_file,
+            port=self.port,
+            metadata={"command": " ".join(server_command(python_executable)), "registered_at": _now_iso()},
+        )
+        return self.status(settings)
+
+    def unregister_current_process(self) -> None:
+        clear_server_state(self.working_dir, expected_pid=os.getpid())
 
     def stop(self) -> Dict[str, Any]:
         self._schedule_action("stop")
@@ -319,11 +340,14 @@ class ServerControlManager:
 
     def _helper_script(self, action: str) -> str:
         launch_python = json.dumps(sys.executable)
-        launch_target = json.dumps(str(self.working_dir / "src" / "webapp.py"))
+        launch_target = json.dumps("src/webapp.py")
         log_path = json.dumps(str(self.log_file))
+        state_path = json.dumps(str(self.working_dir / "webapp" / "state" / "server_state.json"))
+        project_root = json.dumps(str(self.working_dir))
         pid = os.getpid()
         sigterm = int(signal.SIGTERM)
         return f"""
+import json
 import os
 import signal
 import subprocess
@@ -335,18 +359,39 @@ try:
     os.kill(pid, {sigterm})
 except OSError:
     pass
+try:
+    with open({state_path}, "r", encoding="utf-8") as handle:
+        state = json.load(handle)
+    if state.get("pid") == pid:
+        os.unlink({state_path})
+except (OSError, json.JSONDecodeError):
+    pass
 
 if {json.dumps(action)} == "restart":
     time.sleep(2.0)
     with open({log_path}, "ab") as log_handle:
-        subprocess.Popen(
+        child = subprocess.Popen(
             [{launch_python}, {launch_target}],
-            cwd={json.dumps(str(self.working_dir))},
+            cwd={project_root},
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+    try:
+        with open({state_path}, "w", encoding="utf-8") as handle:
+            json.dump({{
+                "pid": child.pid,
+                "port": {self.port},
+                "python_executable": {launch_python},
+                "project_root": {project_root},
+                "log_file": {log_path},
+                "command": {json.dumps(" ".join(server_command(sys.executable)))},
+                "updated_at": {json.dumps(_now_iso())},
+                "source": "helper-restart",
+            }}, handle, indent=2)
+    except OSError:
+        pass
 """
 
 
@@ -573,19 +618,17 @@ class JobManager:
             job.status = "running"
             job.started_at = _now_iso()
 
-        process = subprocess.Popen(
-            job.command,
-            cwd=job.cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-
-        with self._lock:
-            self._jobs[job_id].pid = process.pid
-
         try:
+            process = subprocess.Popen(
+                job.command,
+                cwd=job.cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            with self._lock:
+                self._jobs[job_id].pid = process.pid
             assert process.stdout is not None
             for line in process.stdout:
                 with self._lock:
@@ -701,7 +744,7 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
     if action == "openclip-grid-search":
         resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
         command = [
-            "python", "src/grid_search.py",
+            sys.executable, "-u", "src/grid_search.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--ground-truth", resolved["ground_truth"],
@@ -724,7 +767,7 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
     if action == "videoprism-grid-search":
         resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
         command = [
-            "python", "src/videoprism_grid_search.py",
+            sys.executable, "-u", "src/videoprism_grid_search.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--ground-truth", resolved["ground_truth"],
@@ -745,7 +788,7 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
     if action == "write-a-video-grid-search":
         resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
         command = [
-            "python", "src/wav_grid_search.py",
+            sys.executable, "-u", "src/wav_grid_search.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--ground-truth", resolved["ground_truth"],
@@ -776,7 +819,7 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
 
     if action == "compare-all-models":
         command = [
-            "python", "src/compare_all_models.py",
+            sys.executable, "-u", "src/compare_all_models.py",
             "--benchmark", str(payload.get("benchmark", "all")),
             "--output", output_dir,
             "--llm-model", payload.get("llm_model", settings.get("llm_model", "llama3.2:3b")),

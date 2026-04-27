@@ -17,6 +17,17 @@ import time
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
+from server_runtime import (
+    SERVER_PORT,
+    clear_server_state,
+    get_project_root,
+    get_server_log_path,
+    get_server_status as shared_get_server_status,
+    restart_command as shared_restart_command,
+    server_command,
+    write_server_state,
+)
+
 
 # ANSI color codes
 class Colors:
@@ -34,18 +45,6 @@ class Colors:
 
 def clear_screen():
     os.system('clear' if os.name != 'nt' else 'cls')
-
-
-SERVER_PORT = 8000
-
-
-def get_project_root() -> Path:
-    """Prefer the user's current worktree path over any resolved symlink path."""
-    return Path(os.environ.get('PWD', str(Path(__file__).resolve().parent.parent)))
-
-
-def get_server_log_path() -> Path:
-    return get_project_root() / 'webapp' / 'state' / 'server.log'
 
 
 def print_header():
@@ -286,7 +285,7 @@ def discover_benchmarks(base_dir: str = './data/benchmarks') -> List[Dict]:
 
 def build_command(config: Dict) -> List[str]:
     """Build the command line from a config dict."""
-    cmd = ['python', 'src/main.py']
+    cmd = [sys.executable, 'src/main.py']
     
     cmd.extend(['--video-dir', config['video_dir']])
     cmd.extend(['--output', config.get('output', './output')])
@@ -361,45 +360,23 @@ def run_command(cmd: List[str], dry_run: bool = False):
 
 def _server_command(config: Dict) -> List[str]:
     python_executable = config.get('server_python') or sys.executable
-    return [python_executable, 'src/webapp.py']
-
-
-def _server_pattern(config: Dict) -> str:
-    python_executable = re.escape(config.get('server_python') or sys.executable)
-    return rf"{python_executable} src/webapp\.py"
+    return server_command(python_executable)
 
 
 def get_server_status(config: Dict) -> Dict:
     """Return status info for the FastAPI web server."""
     project_root = get_project_root()
     server_log_path = get_server_log_path()
-    pattern = _server_pattern(config)
-    result = subprocess.run(
-        ['pgrep', '-af', pattern],
-        capture_output=True,
-        text=True,
-        cwd=str(project_root),
+    python_executable = config.get('server_python') or sys.executable
+    status = shared_get_server_status(
+        hostname=config.get('server_hostname', 'localhost'),
+        python_executable=python_executable,
+        project_root=project_root,
+        log_file=server_log_path,
+        port=SERVER_PORT,
     )
-    processes = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        pid_text, _, command = line.partition(' ')
-        try:
-            processes.append({'pid': int(pid_text), 'command': command.strip()})
-        except ValueError:
-            continue
-    primary_pid = processes[0]['pid'] if processes else None
-    return {
-        'running': bool(processes),
-        'pid': primary_pid,
-        'processes': processes,
-        'url': f"http://{config.get('server_hostname', 'localhost')}:{SERVER_PORT}/",
-        'project_root': str(project_root),
-        'log_file': str(server_log_path),
-        'restart_command': f"cd {project_root} && {' '.join(_server_command(config))}",
-    }
+    status['restart_command'] = shared_restart_command(project_root, python_executable)
+    return status
 
 
 def start_server(config: Dict) -> Dict:
@@ -424,6 +401,14 @@ def start_server(config: Dict) -> Dict:
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+    write_server_state(
+        pid=process.pid,
+        project_root=project_root,
+        python_executable=config.get('server_python') or sys.executable,
+        log_file=server_log_path,
+        port=SERVER_PORT,
+        metadata={'source': 'menu-start'},
+    )
     time.sleep(2.0)
     status = get_server_status(config)
     return {
@@ -451,6 +436,8 @@ def stop_server(config: Dict) -> Dict:
         except OSError:
             continue
     time.sleep(2.0)
+    if stopped:
+        clear_server_state(get_project_root())
     return {
         'changed': True,
         'message': f"Stop requested for PID(s): {', '.join(str(pid) for pid in stopped)}.",
@@ -571,7 +558,7 @@ def screen_compare_all_models(config: dict):
     output_dir = get_input("Base Output Directory", f"./output/comparison_multi")
     
     # Build orchestrator command
-    cmd = ['python', 'src/compare_all_models.py']
+    cmd = [sys.executable, 'src/compare_all_models.py']
     cmd.extend(['--benchmark', benchmark])
     cmd.extend(['--output', output_dir])
     cmd.extend(['--llm-model', llm_model])
@@ -588,7 +575,7 @@ def screen_compare_all_models(config: dict):
         
         try:
             # We run this in the foreground so it can orchestrate, it will exit once tmux is spawned.
-            subprocess.run(" ".join(cmd), shell=True, check=True)
+            subprocess.run(cmd, check=True)
             print(f"\n{Colors.GREEN}✓ Dispatch successful.{Colors.END}")
         except subprocess.CalledProcessError as e:
             print(f"\n{Colors.RED}✗ Orchestrator failed with code {e.returncode}{Colors.END}")
@@ -796,7 +783,7 @@ def screen_grid_search(config: Dict):
     disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
     
     # Build grid search command
-    cmd = ['python', 'src/grid_search.py']
+    cmd = [sys.executable, 'src/grid_search.py']
     cmd.extend(['--video-dir', config['video_dir']])
     cmd.extend(['--segments', config['segments']])
     cmd.extend(['--ground-truth', config['ground_truth']])
@@ -934,7 +921,7 @@ def screen_videoprism_grid_search(config: Dict):
     disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
     
     # Build grid search command
-    cmd = ['python', 'src/videoprism_grid_search.py']
+    cmd = [sys.executable, 'src/videoprism_grid_search.py']
     cmd.extend(['--video-dir', config['video_dir']])
     cmd.extend(['--segments', config['segments']])
     cmd.extend(['--ground-truth', config['ground_truth']])
@@ -1097,7 +1084,7 @@ def screen_wav_grid_search(config: Dict):
     disable_windowing = get_yes_no("Disable temporal windowing?", default=True)
     
     # Build grid search command
-    cmd = ['python', 'src/wav_grid_search.py']
+    cmd = [sys.executable, 'src/wav_grid_search.py']
     cmd.extend(['--video-dir', config['video_dir']])
     cmd.extend(['--segments', config['segments']])
     cmd.extend(['--ground-truth', config['ground_truth']])
@@ -1380,7 +1367,7 @@ def screen_benchmark_upload(config: Dict):
     shutil.rmtree(staging_dir, ignore_errors=True)
 
     print(f"\n  {Colors.GREEN}{Colors.BOLD}✓ Benchmark {bm_num} '{bm_title}' created successfully!{Colors.END}")
-    print(f"  {Colors.DIM}You can now run it with: python src/grid_search.py -b {bm_num}{Colors.END}")
+    print(f"  {Colors.DIM}You can now run it with: {sys.executable} src/grid_search.py -b {bm_num}{Colors.END}")
 
     input("\n  Press Enter to continue...")
 

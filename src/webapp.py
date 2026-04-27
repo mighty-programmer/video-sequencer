@@ -42,6 +42,17 @@ class DictPayload(BaseModel):
     payload: Dict[str, Any] = {}
 
 
+@app.on_event("startup")
+def register_server_process() -> None:
+    settings = settings_store.load()
+    server_control_manager.register_current_process(settings)
+
+
+@app.on_event("shutdown")
+def unregister_server_process() -> None:
+    server_control_manager.unregister_current_process()
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(INDEX_FILE)
