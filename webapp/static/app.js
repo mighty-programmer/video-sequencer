@@ -364,12 +364,20 @@ function renderEditor() {
     assembledStatus.textContent = "No rendered output yet.";
   }
 
+  let sequenceScoreTotal = 0;
+  segments.forEach((s) => {
+    const sel = s.candidates.find((c) => c.candidate_id === s.selected_candidate_id) || s.candidates[0];
+    if (sel) sequenceScoreTotal += (sel.combined_score || 0);
+  });
+  $("sequenceScore").textContent = `Sequence Score: ${sequenceScoreTotal.toFixed(3)}`;
+
   const candidateGrid = $("candidateGrid");
   candidateGrid.innerHTML = "";
   activeSegment.candidates.forEach((candidate) => {
     const card = document.createElement("div");
     card.className = `candidate-card ${candidate.candidate_id === activeSegment.selected_candidate_id ? "selected" : ""}`;
     card.innerHTML = `
+      ${candidate.is_optimal ? '<div class="optimal-badge">Optimal Match</div>' : ""}
       <img class="candidate-thumb" src="${candidate.thumbnail_url || ""}" alt="${candidate.file_name}" />
       <div class="candidate-body">
         <div class="candidate-topline">

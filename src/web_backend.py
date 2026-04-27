@@ -198,6 +198,7 @@ class EditorCandidate:
     matched_keywords: List[str] = field(default_factory=list)
     thumbnail_path: Optional[str] = None
     rank: int = 0
+    is_optimal: bool = False
 
 
 @dataclass
@@ -1280,7 +1281,8 @@ class EditorSessionManager:
                 trim_duration=float(selection.trim_duration),
                 matched_keywords=matched_keywords,
                 thumbnail_path=thumbnail_path,
-                rank=1
+                rank=1,
+                is_optimal=True
             )
             
             candidate_list = [candidate]
@@ -1383,6 +1385,8 @@ class EditorSessionManager:
         built.sort(key=lambda item: item.combined_score, reverse=True)
         for rank, candidate in enumerate(built, start=1):
             candidate.rank = rank
+            if rank == 1:
+                candidate.is_optimal = True
 
         segment.candidates = built
         candidate_ids = {item.candidate_id for item in built}

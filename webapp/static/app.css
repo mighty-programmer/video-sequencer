@@ -368,10 +368,27 @@ button:disabled {
 }
 
 .candidate-card {
+  position: relative;
   border-radius: 18px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.optimal-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background: var(--accent);
+  color: #1f211d;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  z-index: 10;
 }
 
 .candidate-card.selected {
