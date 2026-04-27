@@ -24,11 +24,12 @@ async function api(url, options = {}) {
 
   if (!response.ok) {
     let detail = "Request failed.";
+    const clone = response.clone();
     try {
       const payload = await response.json();
       detail = payload.detail || JSON.stringify(payload);
     } catch {
-      detail = await response.text();
+      detail = await clone.text();
     }
     throw new Error(detail);
   }

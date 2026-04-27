@@ -885,10 +885,9 @@ class EditorSessionManager:
                 del self._runtimes[session_id]
                 
         # Delete from disk
-        session_dir = self.sessions_dir / session_id
+        session_dir = SESSIONS_ROOT / session_id
         if session_dir.exists() and session_dir.is_dir():
             shutil.rmtree(session_dir)
-
 
     def update_segment(self, session_id: str, segment_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
         runtime = self._get_runtime(session_id)
