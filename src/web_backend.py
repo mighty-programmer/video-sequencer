@@ -19,7 +19,9 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -59,6 +61,8 @@ WEBAPP_ROOT = PROJECT_ROOT / "webapp"
 STATE_ROOT = WEBAPP_ROOT / "state"
 SESSIONS_ROOT = STATE_ROOT / "sessions"
 SETTINGS_FILE = STATE_ROOT / "settings.json"
+SERVER_LOG_FILE = STATE_ROOT / "server.log"
+SERVER_PORT = 8000
 
 STATE_ROOT.mkdir(parents=True, exist_ok=True)
 SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -261,6 +265,85 @@ class SettingsStore:
             current.update({k: v for k, v in updates.items() if v is not None})
             _write_json(self.settings_file, current)
             return current
+
+
+class ServerControlManager:
+    def __init__(self, log_file: Path = SERVER_LOG_FILE, port: int = SERVER_PORT) -> None:
+        self.log_file = log_file
+        self.port = port
+
+    def status(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        hostname = (settings or {}).get("server_hostname", "localhost")
+        return {
+            "running": True,
+            "pid": os.getpid(),
+            "port": self.port,
+            "hostname": hostname,
+            "url": f"http://{hostname}:{self.port}/",
+            "project_root": str(PROJECT_ROOT),
+            "log_file": str(self.log_file),
+            "python_executable": sys.executable,
+            "restart_command": f"cd {PROJECT_ROOT} && {sys.executable} src/webapp.py",
+        }
+
+    def stop(self) -> Dict[str, Any]:
+        self._schedule_action("stop")
+        return {
+            "scheduled": True,
+            "action": "stop",
+            "message": "Server stop scheduled. The UI will become unavailable in a moment.",
+        }
+
+    def restart(self) -> Dict[str, Any]:
+        self._schedule_action("restart")
+        return {
+            "scheduled": True,
+            "action": "restart",
+            "message": "Server restart scheduled. The UI should come back shortly.",
+        }
+
+    def _schedule_action(self, action: str) -> None:
+        helper = self._helper_script(action)
+        subprocess.Popen(
+            [sys.executable, "-c", helper],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def _helper_script(self, action: str) -> str:
+        launch_python = json.dumps(sys.executable)
+        launch_target = json.dumps(str(PROJECT_ROOT / "src" / "webapp.py"))
+        log_path = json.dumps(str(self.log_file))
+        pid = os.getpid()
+        sigterm = int(signal.SIGTERM)
+        return f"""
+import os
+import signal
+import subprocess
+import time
+
+pid = {pid}
+time.sleep(1.0)
+try:
+    os.kill(pid, {sigterm})
+except OSError:
+    pass
+
+if {json.dumps(action)} == "restart":
+    time.sleep(2.0)
+    with open({log_path}, "ab") as log_handle:
+        subprocess.Popen(
+            [{launch_python}, {launch_target}],
+            cwd={json.dumps(str(PROJECT_ROOT))},
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+"""
 
 
 class CacheManager:
@@ -1374,3 +1457,4 @@ cache_manager = CacheManager()
 benchmark_manager = BenchmarkManager()
 job_manager = JobManager()
 editor_manager = EditorSessionManager()
+server_control_manager = ServerControlManager()

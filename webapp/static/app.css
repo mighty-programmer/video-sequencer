@@ -232,6 +232,11 @@ button:disabled {
   text-decoration: none;
 }
 
+.danger {
+  background: rgba(217, 110, 110, 0.14);
+  color: #7b2020;
+}
+
 .launch-actions,
 .editor-actions,
 .panel-toolbar,
@@ -444,6 +449,16 @@ button:disabled {
   min-height: 20px;
   margin-top: 12px;
   color: var(--ink-soft);
+}
+
+#serverStatusCard code {
+  display: inline-block;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: rgba(47, 51, 54, 0.08);
+  font-family: "SFMono-Regular", "Menlo", monospace;
+  font-size: 0.79rem;
+  word-break: break-all;
 }
 
 .job-item,

@@ -288,6 +288,19 @@
         <section class="tab-panel" id="tab-operations">
           <div class="two-column">
             <div class="card">
+              <div class="section-label">Server Control</div>
+              <div class="stack compact">
+                <div id="serverStatusCard" class="stack compact"></div>
+                <div class="launch-actions">
+                  <button class="ghost" id="refreshServerStatus">Refresh Server Status</button>
+                  <button class="primary" id="restartServer">Restart Server</button>
+                  <button class="ghost danger" id="stopServer">Stop Server</button>
+                </div>
+              </div>
+              <div class="status" id="serverStatusMessage"></div>
+            </div>
+
+            <div class="card">
               <div class="section-label">Settings</div>
               <div class="stack compact">
                 <label>GPU Device <input id="settingGpu" type="text" /></label>

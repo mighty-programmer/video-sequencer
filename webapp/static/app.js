@@ -1,5 +1,6 @@
 const state = {
   settings: {},
+  server: {},
   benchmarks: [],
   cache: null,
   jobs: [],
@@ -209,6 +210,19 @@ function renderSettings() {
   $("settingHostname").value = state.settings.server_hostname || "";
 }
 
+function renderServerStatus() {
+  const container = $("serverStatusCard");
+  if (!container) return;
+  const server = state.server || {};
+  container.innerHTML = `
+    <div><strong>Status:</strong> ${server.running ? "Running" : "Stopped"}</div>
+    <div><strong>PID:</strong> ${server.pid || "unknown"}</div>
+    <div><strong>URL:</strong> ${server.url ? `<a href="${server.url}" target="_blank" rel="noreferrer">${server.url}</a>` : "n/a"}</div>
+    <div><strong>Log File:</strong> ${server.log_file || "n/a"}</div>
+    <div><strong>Restart Command:</strong> <code>${server.restart_command || "n/a"}</code></div>
+  `;
+}
+
 function renderSessions() {
   const list = $("sessionList");
   if (!list) return;
@@ -399,12 +413,14 @@ function switchTab(tabName) {
 async function refreshBootstrap() {
   const payload = await api("/api/bootstrap");
   state.settings = payload.settings;
+  state.server = payload.server || {};
   state.benchmarks = payload.benchmarks;
   state.cache = payload.cache;
   state.jobs = payload.jobs;
   state.sessions = payload.sessions;
 
   renderSettings();
+  renderServerStatus();
   renderBenchmarks();
   renderCache();
   renderJobs();
@@ -620,6 +636,55 @@ async function refreshJobsOnly() {
   renderJobs();
 }
 
+async function refreshServerStatusOnly() {
+  state.server = await api("/api/server");
+  renderServerStatus();
+}
+
+async function waitForServerReturn(timeoutMs = 30000, intervalMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await refreshBootstrap();
+      return true;
+    } catch (error) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+  return false;
+}
+
+async function restartServer() {
+  try {
+    const result = await api("/api/server/restart", {
+      method: "POST",
+      body: JSON.stringify({ payload: {} }),
+    });
+    setStatus("serverStatusMessage", result.message || "Server restart scheduled.");
+    const recovered = await waitForServerReturn();
+    if (recovered) {
+      setStatus("serverStatusMessage", "Server restarted and UI reconnected.");
+    } else {
+      setStatus("serverStatusMessage", "Restart requested. Refresh this page in a few seconds if the UI does not reconnect automatically.", true);
+    }
+  } catch (error) {
+    setStatus("serverStatusMessage", error.message, true);
+  }
+}
+
+async function stopServer() {
+  try {
+    const result = await api("/api/server/stop", {
+      method: "POST",
+      body: JSON.stringify({ payload: {} }),
+    });
+    const restartCommand = state.server?.restart_command || "n/a";
+    setStatus("serverStatusMessage", `${result.message || "Server stop scheduled."} Restart later with: ${restartCommand}`);
+  } catch (error) {
+    setStatus("serverStatusMessage", error.message, true);
+  }
+}
+
 async function exportSegments() {
   if (!state.currentSession) return;
   window.open(`/api/editor/sessions/${state.currentSession.session_id}/segments/export`, "_blank");
@@ -644,6 +709,9 @@ function bindEvents() {
   $("moveSegmentDown").addEventListener("click", () => moveSegment("down"));
   $("uploadBenchmarkButton").addEventListener("click", uploadBenchmark);
   $("saveSettings").addEventListener("click", saveSettings);
+  $("refreshServerStatus").addEventListener("click", refreshServerStatusOnly);
+  $("restartServer").addEventListener("click", restartServer);
+  $("stopServer").addEventListener("click", stopServer);
 
   $("durationMultiplier").addEventListener("input", () => {
     $("durationMultiplierValue").textContent = `${Number($("durationMultiplier").value).toFixed(2)}x`;

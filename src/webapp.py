@@ -26,6 +26,7 @@ from web_backend import (
     cache_manager,
     editor_manager,
     job_manager,
+    server_control_manager,
     settings_store,
 )
 
@@ -51,6 +52,7 @@ def bootstrap() -> Dict[str, Any]:
     settings = settings_store.load()
     return {
         "settings": settings,
+        "server": server_control_manager.status(settings),
         "benchmarks": benchmark_manager.list(settings.get("benchmarks_dir", "./data/benchmarks")),
         "cache": cache_manager.inspect(settings.get("cache_dir", "./cache")),
         "jobs": job_manager.list_jobs(),
@@ -78,6 +80,22 @@ def get_settings() -> Dict[str, Any]:
 @app.post("/api/settings")
 def update_settings(request: DictPayload) -> Dict[str, Any]:
     return settings_store.save(request.payload)
+
+
+@app.get("/api/server")
+def get_server_status() -> Dict[str, Any]:
+    settings = settings_store.load()
+    return server_control_manager.status(settings)
+
+
+@app.post("/api/server/stop")
+def stop_server() -> Dict[str, Any]:
+    return server_control_manager.stop()
+
+
+@app.post("/api/server/restart")
+def restart_server() -> Dict[str, Any]:
+    return server_control_manager.restart()
 
 
 @app.get("/api/cache")
