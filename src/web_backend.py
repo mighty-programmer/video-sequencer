@@ -269,7 +269,8 @@ class SettingsStore:
 
 class ServerControlManager:
     def __init__(self, log_file: Path = SERVER_LOG_FILE, port: int = SERVER_PORT) -> None:
-        self.log_file = log_file
+        self.working_dir = Path(os.environ.get("PWD", str(PROJECT_ROOT)))
+        self.log_file = Path(os.environ.get("VIDEO_SEQUENCER_SERVER_LOG", str(log_file)))
         self.port = port
 
     def status(self, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -280,10 +281,10 @@ class ServerControlManager:
             "port": self.port,
             "hostname": hostname,
             "url": f"http://{hostname}:{self.port}/",
-            "project_root": str(PROJECT_ROOT),
+            "project_root": str(self.working_dir),
             "log_file": str(self.log_file),
             "python_executable": sys.executable,
-            "restart_command": f"cd {PROJECT_ROOT} && {sys.executable} src/webapp.py",
+            "restart_command": f"cd {self.working_dir} && {sys.executable} src/webapp.py",
         }
 
     def stop(self) -> Dict[str, Any]:
@@ -315,7 +316,7 @@ class ServerControlManager:
 
     def _helper_script(self, action: str) -> str:
         launch_python = json.dumps(sys.executable)
-        launch_target = json.dumps(str(PROJECT_ROOT / "src" / "webapp.py"))
+        launch_target = json.dumps(str(self.working_dir / "src" / "webapp.py"))
         log_path = json.dumps(str(self.log_file))
         pid = os.getpid()
         sigterm = int(signal.SIGTERM)
@@ -337,7 +338,7 @@ if {json.dumps(action)} == "restart":
     with open({log_path}, "ab") as log_handle:
         subprocess.Popen(
             [{launch_python}, {launch_target}],
-            cwd={json.dumps(str(PROJECT_ROOT))},
+            cwd={json.dumps(str(self.working_dir))},
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
