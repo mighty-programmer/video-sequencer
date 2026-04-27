@@ -101,3 +101,35 @@ Validated on `neghvar.ced.tuc.gr` on 2026-04-27:
 - Confirmed save/edit actions still work on a fresh `writeavideo` session after creation.
 - Confirmed assembled render output is produced successfully for a fresh `writeavideo` session on the remote server.
 - Confirmed the new in-app `Restart Server` control successfully restarts the live Uvicorn process and reconnects the UI.
+
+### Server control and benchmark execution fixes
+
+This follow-up update closes the loop between the CLI server controls in `src/menu.py`, the live web UI, and the detached background job runner used by the Operations tab.
+
+### What changed
+
+- Added a shared server runtime/state layer in `src/server_runtime.py` so both `menu.py` and the FastAPI backend read and write the same server PID, restart command, log path, and project root.
+- Updated `src/webapp.py` and `src/web_backend.py` so the running server registers itself on startup and clears its state on shutdown, allowing the UI to report the real live PID after CLI-triggered restarts.
+- Updated `src/menu.py` so `Start Server`, `Stop Server`, and `Restart Server` write through the same shared state used by the web UI instead of relying on an independent process scan.
+- Hardened the background job runner in `src/web_backend.py` so `subprocess.Popen(...)` startup failures are captured as failed jobs with logs, instead of leaving the UI stuck on `running`.
+- Switched the remaining background job launchers to `sys.executable -u`, including:
+  - OpenCLIP Grid Search
+  - VideoPrism Grid Search
+  - Write-A-Video Grid Search
+  - Compare All Models
+- Fixed an OpenCLIP benchmark compatibility bug in `src/main.py` where benchmark-mode similarity-matrix generation always passed `use_dual_softmax` and `temperature` arguments even to matcher implementations that do not support them.
+
+### Remote validation
+
+Validated on `neghvar.ced.tuc.gr` on 2026-04-27:
+
+- Confirmed the publicly reachable UI is served from `/data/giannis_pantrakis/video-sequencer`, then updated that checkout to the latest `master`.
+- Restarted the live FastAPI/Uvicorn server after deployment and confirmed the public UI came back successfully.
+- Verified that restarting the server from `menu.py` changes the live PID and that `/api/server` reports the exact same PID through the shared state file.
+- Confirmed the shared server state file is written to `webapp/state/server_state.json` in the live deployment checkout.
+- Confirmed the public UI reports the live PID after restart rather than a stale process.
+- Reproduced a real Quick Benchmark launch from the live HTTP API and confirmed:
+  - the job receives a real child PID
+  - logs stream immediately through `/api/jobs/<job_id>`
+  - the job no longer hangs forever in a false `running` state
+- Reproduced and fixed the OpenCLIP quick-benchmark matcher crash, then reran the benchmark successfully to completion on the remote server.
