@@ -36,9 +36,16 @@ def clear_screen():
     os.system('clear' if os.name != 'nt' else 'cls')
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SERVER_LOG_PATH = PROJECT_ROOT / 'webapp' / 'state' / 'server.log'
 SERVER_PORT = 8000
+
+
+def get_project_root() -> Path:
+    """Prefer the user's current worktree path over any resolved symlink path."""
+    return Path(os.environ.get('PWD', str(Path(__file__).resolve().parent.parent)))
+
+
+def get_server_log_path() -> Path:
+    return get_project_root() / 'webapp' / 'state' / 'server.log'
 
 
 def print_header():
@@ -364,12 +371,14 @@ def _server_pattern(config: Dict) -> str:
 
 def get_server_status(config: Dict) -> Dict:
     """Return status info for the FastAPI web server."""
+    project_root = get_project_root()
+    server_log_path = get_server_log_path()
     pattern = _server_pattern(config)
     result = subprocess.run(
         ['pgrep', '-af', pattern],
         capture_output=True,
         text=True,
-        cwd=str(PROJECT_ROOT),
+        cwd=str(project_root),
     )
     processes = []
     for line in result.stdout.splitlines():
@@ -387,14 +396,16 @@ def get_server_status(config: Dict) -> Dict:
         'pid': primary_pid,
         'processes': processes,
         'url': f"http://{config.get('server_hostname', 'localhost')}:{SERVER_PORT}/",
-        'project_root': str(PROJECT_ROOT),
-        'log_file': str(SERVER_LOG_PATH),
-        'restart_command': f"cd {PROJECT_ROOT} && {' '.join(_server_command(config))}",
+        'project_root': str(project_root),
+        'log_file': str(server_log_path),
+        'restart_command': f"cd {project_root} && {' '.join(_server_command(config))}",
     }
 
 
 def start_server(config: Dict) -> Dict:
     """Start the web server in the background if it is not already running."""
+    project_root = get_project_root()
+    server_log_path = get_server_log_path()
     status = get_server_status(config)
     if status['running']:
         return {
@@ -403,11 +414,11 @@ def start_server(config: Dict) -> Dict:
             'status': status,
         }
 
-    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SERVER_LOG_PATH, 'ab') as log_handle:
+    server_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(server_log_path, 'ab') as log_handle:
         process = subprocess.Popen(
             _server_command(config),
-            cwd=str(PROJECT_ROOT),
+            cwd=str(project_root),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -509,10 +520,11 @@ def screen_server_control(config: Dict):
             continue
         if choice == 5:
             print()
-            if SERVER_LOG_PATH.exists():
-                subprocess.run(['tail', '-n', '40', str(SERVER_LOG_PATH)], cwd=str(PROJECT_ROOT))
+            server_log_path = get_server_log_path()
+            if server_log_path.exists():
+                subprocess.run(['tail', '-n', '40', str(server_log_path)], cwd=str(get_project_root()))
             else:
-                print(f"  {Colors.YELLOW}No server log found yet at {SERVER_LOG_PATH}{Colors.END}")
+                print(f"  {Colors.YELLOW}No server log found yet at {server_log_path}{Colors.END}")
             pause()
             continue
 
