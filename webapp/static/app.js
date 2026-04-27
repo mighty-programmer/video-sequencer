@@ -443,6 +443,7 @@ async function createSession() {
       simple_segmentation: $("sessionSimpleSegmentation").checked,
       enable_object_detection: $("sessionObjects").checked,
       enable_face_detection: $("sessionFaces").checked,
+      exact_matching_mode: $("sessionExactMatching")?.checked || false,
     };
     const session = await api("/api/editor/sessions", {
       method: "POST",

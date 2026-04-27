@@ -843,7 +843,8 @@ class EditorSessionManager:
                 "llm_model": payload.get("llm_model") or settings.get("llm_model", "meta-llama/Llama-3.2-3B-Instruct"),
                 "whisper_model": payload.get("whisper_model") or settings.get("whisper_model", "base"),
                 "openclip_model": payload.get("openclip_model") or settings.get("openclip_model", "ViT-B-32"),
-                "videoprism_model": payload.get("videoprism_model", "videoprism_lvt_public_v1_base"),
+                "videoprism_model": payload.get("videoprism_model", "videoprism_lvt_public_v1_large"),
+                "exact_matching_mode": payload.get("exact_matching_mode", False),
                 "windowing": not payload.get("no_windowing", True),
                 "window_size": payload.get("window_size", 5.0),
                 "window_overlap": payload.get("window_overlap", 0.5),
@@ -893,7 +894,12 @@ class EditorSessionManager:
             if "timing_bias" in updates:
                 segment.timing_bias = _clamp(float(updates["timing_bias"]), -1.0, 1.0)
             segment.duration = max(0.2, segment.end_time - segment.start_time)
-            self._regenerate_segment_candidates(runtime, segment.segment_id)
+            
+            if runtime.session.config.get("exact_matching_mode", False):
+                self._regenerate_all_candidates(runtime)
+            else:
+                self._regenerate_segment_candidates(runtime, segment.segment_id)
+                
             self._update_global_keywords(runtime)
             self._touch(runtime.session)
             self._save_runtime(runtime)
@@ -1206,8 +1212,67 @@ class EditorSessionManager:
         )
 
     def _regenerate_all_candidates(self, runtime: EditorRuntime) -> None:
-        for segment in runtime.session.segments:
-            self._regenerate_segment_candidates(runtime, segment.segment_id)
+        if runtime.session.config.get("exact_matching_mode", False):
+            self._regenerate_exact_matching(runtime)
+        else:
+            for segment in runtime.session.segments:
+                self._regenerate_segment_candidates(runtime, segment.segment_id)
+
+    def _regenerate_exact_matching(self, runtime: EditorRuntime) -> None:
+        from matching import create_sequence_optimal
+        
+        script_segments = [
+            {'text': self._build_query_text(seg), 'duration': max(0.2, seg.duration * seg.duration_multiplier)}
+            for seg in runtime.session.segments
+        ]
+        
+        sequence = create_sequence_optimal(
+            script_segments=script_segments,
+            video_matcher=runtime.matcher,
+            match_only=True,
+            allow_reuse=False
+        )
+        
+        for seg, selection in zip(runtime.session.segments, sequence):
+            candidate_dict = {
+                "video_id": selection.video_id,
+                "file_path": selection.video_file_path,
+                "duration": selection.duration,
+                "similarity_score": selection.similarity_score,
+                "combined_score": selection.similarity_score,
+                "motion_score": 0.0,
+                "context_score": 0.0,
+                "keyword_score": 0.0,
+                "trim_start": selection.trim_start,
+                "trim_end": selection.trim_end,
+                "trim_duration": selection.trim_duration
+            }
+            
+            motion_score = self._measure_motion(runtime, selection.video_file_path, selection.trim_start, selection.trim_end)
+            matched_keywords = self._matched_keywords(runtime, seg, candidate_dict)
+            thumbnail_path = self._ensure_thumbnail(runtime, selection.video_file_path, selection.trim_start, selection.trim_end, 1)
+            
+            candidate = EditorCandidate(
+                candidate_id=f"{seg.segment_id}:1:{selection.video_id}",
+                video_id=selection.video_id,
+                file_path=selection.video_file_path,
+                file_name=Path(selection.video_file_path).name,
+                duration=float(selection.duration),
+                similarity_score=float(selection.similarity_score),
+                combined_score=float(selection.similarity_score),
+                motion_score=float(motion_score),
+                context_score=0.0,
+                keyword_score=0.0,
+                trim_start=float(selection.trim_start),
+                trim_end=float(selection.trim_end),
+                trim_duration=float(selection.trim_duration),
+                matched_keywords=matched_keywords,
+                thumbnail_path=thumbnail_path,
+                rank=1
+            )
+            
+            seg.candidates = [candidate]
+            seg.selected_candidate_id = candidate.candidate_id
 
     def _regenerate_segment_candidates(self, runtime: EditorRuntime, segment_id: int) -> None:
         segment = runtime.session.segments[segment_id]
