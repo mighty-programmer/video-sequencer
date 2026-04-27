@@ -85,6 +85,9 @@ def load_manual_segments(segments_file: str) -> List[ScriptSegment]:
             ...
         ]
     }
+
+    Also supports benchmark-style timing keys such as `start_s` / `end_s`
+    and generic `start` / `end`.
     
     Args:
         segments_file: Path to the JSON file containing segments
@@ -97,9 +100,23 @@ def load_manual_segments(segments_file: str) -> List[ScriptSegment]:
     
     segments = []
     for i, seg_data in enumerate(data.get('segments', [])):
-        # For match-only mode, start/end times might be missing or 0
-        start_time = seg_data.get('start_time', 0.0)
-        end_time = seg_data.get('end_time', 0.0)
+        # Support both editor-style and benchmark-style timing keys.
+        start_time = seg_data.get('start_time')
+        if start_time is None:
+            start_time = seg_data.get('start_s')
+        if start_time is None:
+            start_time = seg_data.get('start', 0.0)
+
+        end_time = seg_data.get('end_time')
+        if end_time is None:
+            end_time = seg_data.get('end_s')
+        if end_time is None and 'duration' in seg_data:
+            end_time = float(start_time) + float(seg_data['duration'])
+        if end_time is None:
+            end_time = seg_data.get('end', 0.0)
+
+        start_time = float(start_time or 0.0)
+        end_time = float(end_time or 0.0)
         
         segment = ScriptSegment(
             segment_id=i,
