@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -773,10 +774,15 @@ class EditorSessionManager:
         )
 
         runtime = EditorRuntime(session=session, session_dir=session_dir)
-        self._initialize_runtime(runtime)
-        self._regenerate_all_candidates(runtime)
-        self._update_global_keywords(runtime)
-        self._save_runtime(runtime)
+        try:
+            self._initialize_runtime(runtime)
+            self._regenerate_all_candidates(runtime)
+            self._update_global_keywords(runtime)
+            self._save_runtime(runtime)
+        except Exception:
+            error_log = session_dir / "create_session_error.log"
+            error_log.write_text(traceback.format_exc(), encoding="utf-8")
+            raise
 
         with self._lock:
             self._runtimes[session_id] = runtime

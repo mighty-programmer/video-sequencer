@@ -16,6 +16,7 @@ for cosine similarity matching.
 import os
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import numpy as np
@@ -41,6 +42,29 @@ logging.basicConfig(level=logging.INFO)
 
 
 from models import VideoMetadata
+
+
+def _progress(iterable, desc: str):
+    """Use tqdm only for interactive CLI runs."""
+    disable_progress = os.environ.get("VIDEO_SEQUENCER_DISABLE_PROGRESS", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if disable_progress:
+        return iterable
+
+    stream = getattr(sys, "stderr", None)
+    if stream is None:
+        return iterable
+    try:
+        if not stream.isatty():
+            return iterable
+    except Exception:
+        return iterable
+
+    try:
+        return tqdm(iterable, desc=desc)
+    except Exception:
+        return iterable
 
 
 class VideoIndexer:
@@ -323,7 +347,7 @@ class VideoIndexer:
         embeddings_list = []
         feature_dim = None
         
-        for video_file in tqdm(video_files, desc="Indexing videos"):
+        for video_file in _progress(video_files, desc="Indexing videos"):
             try:
                 base_video_id = video_file.stem
                 

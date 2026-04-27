@@ -21,6 +21,7 @@ Tunable parameters for grid search optimization:
 """
 
 import os
+import sys
 import json
 import logging
 from pathlib import Path
@@ -73,6 +74,29 @@ DEFAULT_ENSEMBLE_TEMPLATES = [
     'a scene showing {text}',
     'a short clip of {text}',
 ]
+
+
+def _progress(iterable, desc: str):
+    """Use tqdm only for interactive runs; web requests should stay quiet."""
+    disable_progress = os.environ.get("VIDEO_SEQUENCER_DISABLE_PROGRESS", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if disable_progress:
+        return iterable
+
+    stream = getattr(sys, "stderr", None)
+    if stream is None:
+        return iterable
+    try:
+        if not stream.isatty():
+            return iterable
+    except Exception:
+        return iterable
+
+    try:
+        return tqdm(iterable, desc=desc)
+    except Exception:
+        return iterable
 
 
 class OpenCLIPVideoIndexer:
@@ -387,7 +411,7 @@ class OpenCLIPVideoIndexer:
         feature_dim = None
         store_frames = (self.aggregation == 'best_frame')
         
-        for video_file in tqdm(video_files, desc="Indexing videos (OpenCLIP)"):
+        for video_file in _progress(video_files, desc="Indexing videos (OpenCLIP)"):
             try:
                 base_video_id = video_file.stem
                 

@@ -49,6 +49,29 @@ _yolo_model = None
 _deepface = None
 
 
+def _progress(iterable, desc: str):
+    """Use tqdm only when running interactively to avoid web-server pipe errors."""
+    disable_progress = os.environ.get("VIDEO_SEQUENCER_DISABLE_PROGRESS", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if disable_progress:
+        return iterable
+
+    stream = getattr(sys, "stderr", None)
+    if stream is None:
+        return iterable
+    try:
+        if not stream.isatty():
+            return iterable
+    except Exception:
+        return iterable
+
+    try:
+        return tqdm(iterable, desc=desc)
+    except Exception:
+        return iterable
+
+
 def _get_yolo_model(model_size: str = 'yolov8n'):
     """Lazy-load YOLOv8 model."""
     global _yolo_model
@@ -459,7 +482,7 @@ class MultiModalKeywordIndexer:
         self.video_entries = []
         self._all_face_embeddings = []
         
-        for video_file in tqdm(video_files, desc="Indexing videos"):
+        for video_file in _progress(video_files, desc="Indexing videos"):
             video_id = video_file.stem
             
             try:

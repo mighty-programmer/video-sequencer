@@ -74,3 +74,26 @@ Completed locally:
 Attempted remotely:
 
 - On 2026-04-17, SSH validation against `neghvar.ced.tuc.gr:22` timed out from this environment before authentication, so server-side runtime validation could not be completed here.
+
+## 2026-04-27
+
+### Remote deployment follow-up
+
+This follow-up release fixes issues that only appeared once the web studio was exercised on the remote server with real benchmark data and the production-style detached Uvicorn process.
+
+### What changed
+
+- Fixed manual benchmark segment loading for editor sessions so benchmark files using `start_s` and `end_s` retain their authored timings instead of collapsing to the minimum fallback duration.
+- Disabled terminal-only progress bars for web-server indexing requests, which removes a `Broken pipe` failure mode seen when creating fresh `writeavideo` sessions on the remote server.
+- Added per-session `create_session_error.log` output under `webapp/state/sessions/<session_id>/` so server-side initialization failures leave an inspectable traceback.
+- Applied the same non-interactive progress handling to VideoPrism, OpenCLIP, and Write-A-Video indexing paths to keep the web deployment stable across retrieval modes.
+
+### Remote validation
+
+Validated on `neghvar.ced.tuc.gr` on 2026-04-27:
+
+- Confirmed the remote checkout is on branch `codex/write-a-video-web-studio`.
+- Confirmed benchmark-backed editor sessions open correctly through the live web UI.
+- Confirmed `openclip` editor sessions preserve benchmark-authored timings in the text editor.
+- Reproduced the live `writeavideo` session-creation failure from both HTTP requests and the browser UI before applying the progress-bar fix.
+- Reconnected to the server over SSH after the VPN interruption to continue deployment and verification work.

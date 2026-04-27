@@ -4,6 +4,7 @@ FastAPI application for the Video Sequencer web interface.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# The web server runs long indexing requests in a non-interactive environment,
+# so terminal progress bars can fail with BrokenPipeError when detached.
+os.environ.setdefault("VIDEO_SEQUENCER_DISABLE_PROGRESS", "1")
 
 from web_backend import (
     PROJECT_ROOT,
@@ -260,4 +265,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("webapp:app", host="0.0.0.0", port=8000, reload=False)
-
