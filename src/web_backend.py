@@ -1272,7 +1272,7 @@ class EditorSessionManager:
             )
             
             candidate_list = [candidate]
-            pool_size = runtime.session.candidate_pool_size
+            pool_size = int(runtime.session.config.get("candidate_pool_size", 10))
             
             if pool_size > 1:
                 raw_matches = runtime.matcher.match_segment_to_videos(
@@ -1328,7 +1328,7 @@ class EditorSessionManager:
         candidates = matcher.match_segment_to_videos(
             query_text,
             effective_duration,
-            k=8,
+            k=int(runtime.session.config.get("candidate_pool_size", 10)),
             allow_reuse=True,
             used_videos=set(),
             match_only=False,
