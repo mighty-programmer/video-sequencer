@@ -12,6 +12,8 @@ import sys
 import json
 import subprocess
 import re
+import signal
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
@@ -32,6 +34,11 @@ class Colors:
 
 def clear_screen():
     os.system('clear' if os.name != 'nt' else 'cls')
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SERVER_LOG_PATH = PROJECT_ROOT / 'webapp' / 'state' / 'server.log'
+SERVER_PORT = 8000
 
 
 def print_header():
@@ -79,6 +86,10 @@ def print_title(title: str):
     """Print a section title."""
     print(f"\n{Colors.BOLD}{Colors.YELLOW}  {title}{Colors.END}")
     print(f"  {'─' * 56}")
+
+
+def pause():
+    input("\n  Press Enter to continue...")
 
 
 def get_input(prompt: str, default: Optional[str] = None) -> str:
@@ -339,6 +350,171 @@ def run_command(cmd: List[str], dry_run: bool = False):
         print(f"\n  {Colors.YELLOW}⚠ Interrupted by user{Colors.END}")
     except Exception as e:
         print(f"  {Colors.RED}Error: {e}{Colors.END}")
+
+
+def _server_command(config: Dict) -> List[str]:
+    python_executable = config.get('server_python') or sys.executable
+    return [python_executable, 'src/webapp.py']
+
+
+def _server_pattern(config: Dict) -> str:
+    python_executable = re.escape(config.get('server_python') or sys.executable)
+    return rf"{python_executable} src/webapp\.py"
+
+
+def get_server_status(config: Dict) -> Dict:
+    """Return status info for the FastAPI web server."""
+    pattern = _server_pattern(config)
+    result = subprocess.run(
+        ['pgrep', '-af', pattern],
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
+    )
+    processes = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_text, _, command = line.partition(' ')
+        try:
+            processes.append({'pid': int(pid_text), 'command': command.strip()})
+        except ValueError:
+            continue
+    primary_pid = processes[0]['pid'] if processes else None
+    return {
+        'running': bool(processes),
+        'pid': primary_pid,
+        'processes': processes,
+        'url': f"http://{config.get('server_hostname', 'localhost')}:{SERVER_PORT}/",
+        'project_root': str(PROJECT_ROOT),
+        'log_file': str(SERVER_LOG_PATH),
+        'restart_command': f"cd {PROJECT_ROOT} && {' '.join(_server_command(config))}",
+    }
+
+
+def start_server(config: Dict) -> Dict:
+    """Start the web server in the background if it is not already running."""
+    status = get_server_status(config)
+    if status['running']:
+        return {
+            'changed': False,
+            'message': f"Server is already running (PID {status['pid']}).",
+            'status': status,
+        }
+
+    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SERVER_LOG_PATH, 'ab') as log_handle:
+        process = subprocess.Popen(
+            _server_command(config),
+            cwd=str(PROJECT_ROOT),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    time.sleep(2.0)
+    status = get_server_status(config)
+    return {
+        'changed': True,
+        'message': f"Server start requested (spawned PID {process.pid}).",
+        'status': status,
+    }
+
+
+def stop_server(config: Dict) -> Dict:
+    """Stop all matching web server processes."""
+    status = get_server_status(config)
+    if not status['running']:
+        return {
+            'changed': False,
+            'message': "Server is not running.",
+            'status': status,
+        }
+
+    stopped = []
+    for proc in status['processes']:
+        try:
+            os.kill(proc['pid'], signal.SIGTERM)
+            stopped.append(proc['pid'])
+        except OSError:
+            continue
+    time.sleep(2.0)
+    return {
+        'changed': True,
+        'message': f"Stop requested for PID(s): {', '.join(str(pid) for pid in stopped)}.",
+        'status': get_server_status(config),
+    }
+
+
+def restart_server(config: Dict) -> Dict:
+    """Restart the web server."""
+    stop_server(config)
+    return start_server(config)
+
+
+def screen_server_control(config: Dict):
+    """Manage the FastAPI web server from the CLI menu."""
+    while True:
+        clear_screen()
+        print_header()
+        print_title("Server Control")
+
+        status = get_server_status(config)
+        running_label = f"{Colors.GREEN}Running{Colors.END}" if status['running'] else f"{Colors.RED}Stopped{Colors.END}"
+        pid_label = status['pid'] if status['pid'] else 'n/a'
+
+        print(f"  Status:          {running_label}")
+        print(f"  PID:             {pid_label}")
+        print(f"  URL:             {status['url']}")
+        print(f"  Project Root:    {status['project_root']}")
+        print(f"  Log File:        {status['log_file']}")
+        print(f"  Restart Command: {status['restart_command']}")
+
+        if status['processes']:
+            print(f"\n  {Colors.DIM}Matching processes:{Colors.END}")
+            for proc in status['processes']:
+                print(f"    PID {proc['pid']}: {proc['command']}")
+
+        print_menu("Server Actions", [
+            ("Refresh Status", "Re-scan the running FastAPI web server"),
+            ("Start Server", "Launch src/webapp.py in the background"),
+            ("Stop Server", "Terminate the running web server process"),
+            ("Restart Server", "Stop and immediately relaunch the web server"),
+            ("Tail Server Log", "Show the last 40 lines of webapp/state/server.log"),
+        ])
+
+        choice = get_choice(5)
+        if choice == 0:
+            return
+        if choice == 1:
+            continue
+        if choice == 2:
+            result = start_server(config)
+            print(f"\n  {Colors.GREEN if result['status']['running'] else Colors.YELLOW}{result['message']}{Colors.END}")
+            pause()
+            continue
+        if choice == 3:
+            if get_yes_no("Stop the web server?", default=False):
+                result = stop_server(config)
+                print(f"\n  {Colors.YELLOW}{result['message']}{Colors.END}")
+            pause()
+            continue
+        if choice == 4:
+            if get_yes_no("Restart the web server?", default=True):
+                result = restart_server(config)
+                color = Colors.GREEN if result['status']['running'] else Colors.RED
+                print(f"\n  {color}{result['message']}{Colors.END}")
+            pause()
+            continue
+        if choice == 5:
+            print()
+            if SERVER_LOG_PATH.exists():
+                subprocess.run(['tail', '-n', '40', str(SERVER_LOG_PATH)], cwd=str(PROJECT_ROOT))
+            else:
+                print(f"  {Colors.YELLOW}No server log found yet at {SERVER_LOG_PATH}{Colors.END}")
+            pause()
+            continue
 
 
 def screen_compare_all_models(config: dict):
@@ -1387,9 +1563,10 @@ def screen_settings(config: Dict):
     config['output'] = get_input("Default output directory", config.get('output', './output'))
     config['cache_dir'] = get_input("Cache directory", config.get('cache_dir', './cache'))
     config['server_hostname'] = get_input("Server hostname (for scp)", config.get('server_hostname', 'neghvar.ced.tuc.gr'))
+    config['server_python'] = get_input("Python executable for web server", config.get('server_python', sys.executable))
     
     print(f"\n  {Colors.GREEN}✓ Settings updated{Colors.END}")
-    input("\n  Press Enter to continue...")
+    pause()
 
 
 def screen_cache_management(config: Dict):
@@ -1476,6 +1653,7 @@ def main_menu():
         'output': './output',
         'cache_dir': './cache',
         'server_hostname': 'neghvar.ced.tuc.gr',
+        'server_python': sys.executable,
         'video_dir': None, # Initialize video_dir for screen_main
     }
     
@@ -1491,7 +1669,8 @@ def main_menu():
         8: screen_benchmark_download,
         9: screen_benchmark_delete,
         10: screen_cache_management,
-        11: screen_settings,
+        11: screen_server_control,
+        12: screen_settings,
     }
 
     while True:
@@ -1512,6 +1691,7 @@ def main_menu():
             ("Download Benchmark", "Export a benchmark to a single folder for download"),
             ("Delete Benchmark", "Permanently remove a benchmark and all its files"),
             ("Cache Management", "View and clear cached indexes"),
+            ("Server Control", "Start, stop, restart, and inspect the web UI server"),
             ("Settings", "Configure GPU, output directory, etc."),
         ])
         
