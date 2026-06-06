@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Sequencer Studio</title>
-    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/app.css?v=20260606-session-controls" />
   </head>
   <body>
     <div class="shell">
@@ -100,9 +100,9 @@
                 <input id="sessionFaces" type="checkbox" />
                 Enable Face Clustering
               </label>
-              <label class="toggle">
+              <label class="toggle" title="Use global one-to-one assignment across all segments instead of independent per-segment candidate selection.">
                 <input id="sessionExactMatching" type="checkbox" />
-                Exact Match (Benchmark Mode)
+                Global One-to-One Matching
               </label>
             </div>
             <div class="launch-actions">
@@ -353,6 +353,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js" type="module"></script>
+    <script src="/static/app.js?v=20260606-session-controls" type="module"></script>
   </body>
 </html>

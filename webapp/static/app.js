@@ -229,6 +229,7 @@ function setControlVisible(fieldId, inputId, visible) {
   const input = $(inputId);
   if (!field || !input) return;
   field.hidden = !visible;
+  field.classList.toggle("hidden", !visible);
   input.disabled = !visible;
 }
 

@@ -521,6 +521,10 @@ button:disabled {
   display: none !important;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
