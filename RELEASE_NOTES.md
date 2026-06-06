@@ -133,3 +133,15 @@ Validated on `neghvar.ced.tuc.gr` on 2026-04-27:
   - logs stream immediately through `/api/jobs/<job_id>`
   - the job no longer hangs forever in a false `running` state
 - Reproduced and fixed the OpenCLIP quick-benchmark matcher crash, then reran the benchmark successfully to completion on the remote server.
+
+### Retrieval-mode-aware editor controls
+
+This update makes the editor session setup form match the retrieval pipeline that will actually run.
+
+### What changed
+
+- The editor now hides OpenCLIP model selection when `VideoPrism` retrieval is selected and shows a VideoPrism model selector instead.
+- Object detection, face clustering, and keyword weighting are now shown only for `Write-A-Video`, because those controls only affect the multi-modal keyword indexing stage used by that mode.
+- Simple segmentation is hidden when the selected benchmark or custom session already has manual segments, because manual segments bypass transcription and segmentation entirely.
+- Session creation now normalizes ignored keyword-indexing flags on the backend so VideoPrism/OpenCLIP sessions do not persist misleading object or face detection settings.
+- VideoPrism index saving now defensively recreates its cache directory before writing FAISS files.

@@ -224,6 +224,34 @@ function renderServerStatus() {
   `;
 }
 
+function setControlVisible(fieldId, inputId, visible) {
+  const field = $(fieldId);
+  const input = $(inputId);
+  if (!field || !input) return;
+  field.hidden = !visible;
+  input.disabled = !visible;
+}
+
+function updateSessionModeControls() {
+  const mode = $("sessionMode")?.value || "writeavideo";
+  const usesOpenclip = mode === "openclip" || mode === "writeavideo";
+  const usesVideoprism = mode === "videoprism";
+  const usesKeywordIndex = mode === "writeavideo";
+  const selectedBenchmark = state.benchmarks.find((benchmark) => benchmark.number === $("sessionBenchmark")?.value);
+  const hasManualSegments = Boolean($("sessionSegments")?.value.trim()) || Boolean(selectedBenchmark?.has_segments);
+  const canSegmentAudio = !hasManualSegments;
+
+  setControlVisible("sessionOpenclipModelField", "sessionOpenclipModel", usesOpenclip);
+  setControlVisible("sessionVideoprismModelField", "sessionVideoprismModel", usesVideoprism);
+  setControlVisible("sessionKeywordWeightField", "sessionKeywordWeight", usesKeywordIndex);
+  setControlVisible("sessionObjectsField", "sessionObjects", usesKeywordIndex);
+  setControlVisible("sessionFacesField", "sessionFaces", usesKeywordIndex);
+
+  // Candidate count still controls how many alternatives are shown for every mode.
+  setControlVisible("sessionPoolField", "sessionPool", true);
+  setControlVisible("sessionSimpleSegmentationField", "sessionSimpleSegmentation", canSegmentAudio);
+}
+
 function renderSessions() {
   const list = $("sessionList");
   if (!list) return;
@@ -477,14 +505,15 @@ async function createSession() {
       benchmark: $("sessionBenchmark").value || null,
       retrieval_mode: $("sessionMode").value,
       openclip_model: $("sessionOpenclipModel").value,
+      videoprism_model: $("sessionVideoprismModel").value,
       video_dir: $("sessionVideoDir").value.trim(),
       audio: $("sessionAudio").value.trim(),
       segments: $("sessionSegments").value.trim(),
       candidate_pool_size: asNumber($("sessionPool").value, 10),
       keyword_weight: asNumber($("sessionKeywordWeight").value, 0.2),
       simple_segmentation: $("sessionSimpleSegmentation").checked,
-      enable_object_detection: $("sessionObjects").checked,
-      enable_face_detection: $("sessionFaces").checked,
+      enable_object_detection: $("sessionMode").value === "writeavideo" && $("sessionObjects").checked,
+      enable_face_detection: $("sessionMode").value === "writeavideo" && $("sessionFaces").checked,
       exact_matching_mode: $("sessionExactMatching")?.checked || false,
     };
     const session = await api("/api/editor/sessions", {
@@ -749,6 +778,9 @@ function bindEvents() {
   });
 
   $("refreshAll").addEventListener("click", refreshBootstrap);
+  $("sessionMode").addEventListener("change", updateSessionModeControls);
+  $("sessionBenchmark").addEventListener("change", updateSessionModeControls);
+  $("sessionSegments").addEventListener("input", updateSessionModeControls);
   $("createSession").addEventListener("click", createSession);
   $("refreshSessions").addEventListener("click", refreshBootstrap);
   $("saveSegment").addEventListener("click", saveSegmentSettings);
@@ -792,7 +824,9 @@ function bindEvents() {
 
 async function initialize() {
   bindEvents();
+  updateSessionModeControls();
   await refreshBootstrap();
+  updateSessionModeControls();
   renderEditor();
   setInterval(refreshJobsOnly, 4000);
 }

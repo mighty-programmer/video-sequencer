@@ -53,12 +53,19 @@
                   <option value="videoprism">VideoPrism</option>
                 </select>
               </label>
-              <label>
+              <label id="sessionOpenclipModelField">
                 OpenCLIP Model
                 <select id="sessionOpenclipModel">
                   <option value="ViT-B-32">ViT-B-32</option>
                   <option value="ViT-B-16">ViT-B-16</option>
                   <option value="ViT-L-14">ViT-L-14</option>
+                </select>
+              </label>
+              <label id="sessionVideoprismModelField" hidden>
+                VideoPrism Model
+                <select id="sessionVideoprismModel">
+                  <option value="videoprism_lvt_public_v1_large">VideoPrism LVT Large</option>
+                  <option value="videoprism_lvt_public_v1_base">VideoPrism LVT Base</option>
                 </select>
               </label>
               <label class="wide">
@@ -73,23 +80,23 @@
                 Manual Segments File
                 <input id="sessionSegments" type="text" placeholder="./examples/example_segments.json" />
               </label>
-              <label>
+              <label id="sessionPoolField">
                 Candidate Pool
                 <input id="sessionPool" type="number" min="3" max="30" value="10" />
               </label>
-              <label>
+              <label id="sessionKeywordWeightField">
                 Keyword Weight
                 <input id="sessionKeywordWeight" type="number" step="0.05" min="0" max="1" value="0.2" />
               </label>
-              <label class="toggle">
+              <label class="toggle" id="sessionSimpleSegmentationField">
                 <input id="sessionSimpleSegmentation" type="checkbox" />
                 Use Simple Segmentation
               </label>
-              <label class="toggle">
+              <label class="toggle" id="sessionObjectsField">
                 <input id="sessionObjects" type="checkbox" checked />
                 Enable Object Detection
               </label>
-              <label class="toggle">
+              <label class="toggle" id="sessionFacesField">
                 <input id="sessionFaces" type="checkbox" />
                 Enable Face Clustering
               </label>

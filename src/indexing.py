@@ -514,6 +514,7 @@ class VideoIndexer:
         
         index_path = self.index_dir / 'faiss_index.bin'
         metadata_path = self.index_dir / 'metadata.json'
+        self.index_dir.mkdir(parents=True, exist_ok=True)
         
         # Save FAISS index
         faiss.write_index(self.index, str(index_path))

@@ -865,6 +865,9 @@ class EditorSessionManager:
         if not video_dir:
             raise ValueError("A video directory or benchmark is required to create an editor session.")
 
+        retrieval_mode = payload.get("retrieval_mode") or settings.get("editor_mode", "writeavideo")
+        enable_keyword_index = retrieval_mode == "writeavideo"
+
         segments = self._load_segments(
             audio_file=audio_file,
             segments_file=segments_file,
@@ -887,7 +890,7 @@ class EditorSessionManager:
             segments_file=segments_file,
             output_dir=str(output_dir),
             cache_dir=str(cache_dir),
-            retrieval_mode=payload.get("retrieval_mode") or settings.get("editor_mode", "writeavideo"),
+            retrieval_mode=retrieval_mode,
             config={
                 "gpu_device": payload.get("gpu_device") or settings.get("gpu_device", "cuda:0"),
                 "llm_model": payload.get("llm_model") or settings.get("llm_model", "meta-llama/Llama-3.2-3B-Instruct"),
@@ -899,9 +902,9 @@ class EditorSessionManager:
                 "window_size": payload.get("window_size", 5.0),
                 "window_overlap": payload.get("window_overlap", 0.5),
                 "candidate_pool_size": payload.get("candidate_pool_size", 10),
-                "keyword_weight": payload.get("keyword_weight", 0.2),
-                "enable_object_detection": payload.get("enable_object_detection", True),
-                "enable_face_detection": payload.get("enable_face_detection", False),
+                "keyword_weight": payload.get("keyword_weight", 0.2) if enable_keyword_index else 0.0,
+                "enable_object_detection": bool(payload.get("enable_object_detection", True)) if enable_keyword_index else False,
+                "enable_face_detection": bool(payload.get("enable_face_detection", False)) if enable_keyword_index else False,
                 "yolo_model": payload.get("yolo_model", "yolov8n"),
                 "frames_per_second": payload.get("frames_per_second", 1.0),
             },
@@ -1148,6 +1151,7 @@ class EditorSessionManager:
             if not VIDEOPRISM_AVAILABLE or VideoIndexer is None:
                 raise RuntimeError("VideoPrism is not available in this environment.")
             index_dir = cache_dir / "editor_videoprism"
+            index_dir.mkdir(parents=True, exist_ok=True)
             indexer = VideoIndexer(
                 model_name=session.config.get("videoprism_model", "videoprism_lvt_public_v1_base"),
                 index_dir=str(index_dir),
