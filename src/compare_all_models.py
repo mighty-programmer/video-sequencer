@@ -15,6 +15,7 @@ import logging
 import argparse
 import subprocess
 import re
+import shlex
 from pathlib import Path
 
 # Add src to path
@@ -26,7 +27,19 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
 
 
+def normalize_benchmark_id(value: str) -> str:
+    match = re.search(r'\d+', str(value))
+    if not match:
+        raise ValueError(f"Invalid benchmark identifier: {value}")
+    return match.group(0)
+
+
+def shell_join(parts: list) -> str:
+    return shlex.join([str(part) for part in parts])
+
+
 def resolve_benchmark(benchmark_num: str, base_dir: str = './data/benchmarks') -> dict:
+    benchmark_num = normalize_benchmark_id(benchmark_num)
     base = Path(base_dir)
     video_dir = base / 'videos' / f'video_{benchmark_num}'
     segments_file = base / 'segments' / f'benchmark_{benchmark_num}_segments.json'
@@ -153,7 +166,7 @@ def main():
             logger.error("No benchmarks found to process.")
             sys.exit(1)
     else:
-        benchmarks = [b.strip() for b in args.benchmark.split(',') if b.strip()]
+        benchmarks = [normalize_benchmark_id(b.strip()) for b in args.benchmark.split(',') if b.strip()]
         
     base_output = Path(args.output)
     base_cache = Path(args.cache_dir)
@@ -202,67 +215,85 @@ def main():
                 dst.write(src.read())
 
         common_args = [
-            f"--video-dir {bm_paths['video_dir']}",
-            f"--segments {bm_paths['segments']}",
-            f"--ground-truth {bm_paths['ground_truth']}",
-            f"--llm-model {args.llm_model}"
+            "--video-dir", bm_paths['video_dir'],
+            "--segments", bm_paths['segments'],
+            "--ground-truth", bm_paths['ground_truth'],
+            "--llm-model", args.llm_model,
         ]
         if args.no_windowing:
             common_args.append("--no-windowing")
             
         # OpenCLIP Max Combinations (Gets GPU 0)
         oc_args = common_args + [
-            f"--device {devices[0 % len(devices)]}",
-            f"--output {dirs['openclip']['out']}",
-            f"--cache-dir {dirs['openclip']['cache']}",
-            "--models ViT-B-32 ViT-B-16 ViT-L-14",
-            "--frames 4 8 16 32",
-            "--aggregations mean max best_frame",
-            "--prompt-modes none template:video template:photo template:cooking ensemble:template ensemble:llm"
+            "--device", devices[0 % len(devices)],
+            "--output", dirs['openclip']['out'],
+            "--cache-dir", dirs['openclip']['cache'],
+            "--models", "ViT-B-32", "ViT-B-16", "ViT-L-14",
+            "--frames", "4", "8", "16", "32",
+            "--aggregations", "mean", "max", "best_frame",
+            "--prompt-modes", "none", "template:video", "template:photo", "template:cooking", "ensemble:template", "ensemble:llm",
         ]
-        command_lists['openclip_compare'].append(f"python src/grid_search.py {' '.join(oc_args)}")
+        command_lists['openclip_compare'].append(shell_join([sys.executable, "src/grid_search.py", *oc_args]))
         
         # VideoPrism Max Combinations (Gets GPU 1)
         vp_args = common_args + [
-            f"--device {devices[1 % len(devices)]}",
-            f"--output {dirs['videoprism']['out']}",
-            f"--cache-dir {dirs['videoprism']['cache']}",
-            "--models videoprism_lvt_public_v1_base videoprism_lvt_public_v1_large",
-            "--frames 8 16 32",
-            "--prompt-modes none template:video template:photo template:scene template:cooking ensemble:template ensemble:llm"
+            "--device", devices[1 % len(devices)],
+            "--output", dirs['videoprism']['out'],
+            "--cache-dir", dirs['videoprism']['cache'],
+            "--models", "videoprism_lvt_public_v1_base", "videoprism_lvt_public_v1_large",
+            "--frames", "8", "16", "32",
+            "--prompt-modes", "none", "template:video", "template:photo", "template:scene", "template:cooking", "ensemble:template", "ensemble:llm",
         ]
-        command_lists['videoprism_compare'].append(f"python src/videoprism_grid_search.py {' '.join(vp_args)}")
+        command_lists['videoprism_compare'].append(shell_join([sys.executable, "src/videoprism_grid_search.py", *vp_args]))
         
         # WAV Max Combinations (Gets GPU 2)
         wav_args = common_args + [
-            f"--device {devices[2 % len(devices)]}",
-            f"--output {dirs['wav']['out']}",
-            f"--cache-dir {dirs['wav']['cache']}",
-            "--models ViT-B-32 ViT-B-16 ViT-L-14",
-            "--frames 4 8 16 32",
-            "--aggregations mean max best_frame",
-            "--prompt-modes none template:video template:photo template:cooking template:scene ensemble:template ensemble:llm",
-            "--pool-sizes 5 10 20",
-            "--keyword-weights 0.0 0.1 0.2 0.3"
+            "--device", devices[2 % len(devices)],
+            "--output", dirs['wav']['out'],
+            "--cache-dir", dirs['wav']['cache'],
+            "--models", "ViT-B-32", "ViT-B-16", "ViT-L-14",
+            "--frames", "4", "8", "16", "32",
+            "--aggregations", "mean", "max", "best_frame",
+            "--prompt-modes", "none", "template:video", "template:photo", "template:cooking", "template:scene", "ensemble:template", "ensemble:llm",
+            "--pool-sizes", "5", "10", "20",
+            "--keyword-weights", "0.0", "0.1", "0.2", "0.3",
         ]
-        command_lists['wav_compare'].append(f"python src/wav_grid_search.py {' '.join(wav_args)}")
+        command_lists['wav_compare'].append(shell_join([sys.executable, "src/wav_grid_search.py", *wav_args]))
 
     create_summary_script(base_output, benchmarks)
 
-    # Spawn tmux sessions, chaining the benchmark commands with ;
+    spawned_sessions = []
     for session_name, cmds in command_lists.items():
         if not cmds:
             continue
         logger.info(f"Spawning {session_name} with {len(cmds)} benchmark runs...")
+        subprocess.run(["tmux", "kill-session", "-t", session_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         chained_cmd = " ; ".join(cmds)
-        subprocess.run(["tmux", "new-session", "-d", "-s", session_name, f"{chained_cmd} ; read -p 'Press Enter to exit'"])
-        
-    print(f"\\nAll 3 grid search pipelines explicitly maxed out across {len(benchmarks)} benchmarks and launched in parallel!")
-    print(f"Monitor them via:")
-    print(f"  tmux attach -t openclip_compare")
-    print(f"  tmux attach -t videoprism_compare")
-    print(f"  tmux attach -t wav_compare")
-    print(f"When all finish, run:")
+        tmux_command = (
+            f"set -e; {chained_cmd}; "
+            "status=$?; echo; "
+            "echo '[compare-all-models] finished with exit code' $status; "
+            "read -p 'Press Enter to exit'; exit $status"
+        )
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session_name, tmux_command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown tmux error"
+            raise RuntimeError(f"Failed to create tmux session {session_name}: {detail}")
+        spawned_sessions.append(session_name)
+
+    if not spawned_sessions:
+        raise RuntimeError("No compare tmux sessions were created. Check benchmark inputs and benchmark files.")
+
+    print(f"\nLaunched {len(spawned_sessions)} compare tmux sessions across {len(benchmarks)} benchmark(s).")
+    print("Monitor them via:")
+    for session_name in spawned_sessions:
+        print(f"  tmux attach -t {session_name}")
+    print("When all finish, run:")
     print(f"  bash {base_output / 'generate_comparison_report.sh'}")
 
 if __name__ == '__main__':

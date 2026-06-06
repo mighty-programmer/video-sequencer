@@ -677,6 +677,29 @@ def resolve_benchmark_paths(benchmark_number: str, benchmarks_dir: str) -> Dict[
     }
 
 
+def _available_cuda_devices(limit: int = 3) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    devices = []
+    for line in result.stdout.splitlines():
+        index = line.strip()
+        if index.isdigit():
+            devices.append(f"cuda:{index}")
+        if len(devices) >= limit:
+            break
+    return ",".join(devices) if devices else None
+
+
 def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, Any]) -> Tuple[str, List[str]]:
     payload = copy.deepcopy(payload)
     benchmarks_dir = payload.get("benchmarks_dir") or settings.get("benchmarks_dir", "./data/benchmarks")
@@ -818,12 +841,13 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         return ("Write-A-Video Grid Search", command)
 
     if action == "compare-all-models":
+        compare_gpu_device = payload.get("gpu_device") or _available_cuda_devices() or gpu_device
         command = [
             sys.executable, "-u", "src/compare_all_models.py",
             "--benchmark", str(payload.get("benchmark", "all")),
             "--output", output_dir,
             "--llm-model", payload.get("llm_model", settings.get("llm_model", "llama3.2:3b")),
-            "--device", gpu_device,
+            "--device", compare_gpu_device,
         ]
         if payload.get("no_windowing", True):
             command.append("--no-windowing")

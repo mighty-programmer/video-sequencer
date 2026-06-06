@@ -215,7 +215,9 @@ class WAVGridSearch:
         prompt_modes: List[str] = None,
         candidate_pool_sizes: List[int] = None,
         keyword_weights: List[float] = None,
-        llm_model: str = None
+        llm_model: str = None,
+        enable_face_detection: bool = True,
+        enable_object_detection: bool = True
     ) -> List[WAVGridSearchConfig]:
         """Generate all parameter configurations to test."""
         if models is None:
@@ -247,8 +249,8 @@ class WAVGridSearch:
                 prompt_mode=prompt_mode,
                 candidate_pool_size=pool_size,
                 keyword_weight=kw_weight,
-                enable_face_detection=True,
-                enable_object_detection=True,
+                enable_face_detection=enable_face_detection,
+                enable_object_detection=enable_object_detection,
             )
 
             # Set prompt template or ensemble prompts based on mode
@@ -465,7 +467,9 @@ class WAVGridSearch:
         candidate_pool_sizes: List[int] = None,
         keyword_weights: List[float] = None,
         llm_model: str = None,
-        quick: bool = False
+        quick: bool = False,
+        enable_face_detection: bool = True,
+        enable_object_detection: bool = True
     ) -> List[WAVGridSearchResult]:
         """
         Run the full grid search.
@@ -479,6 +483,8 @@ class WAVGridSearch:
             keyword_weights: Keyword weights to test
             llm_model: Ollama model for LLM ensemble (None to skip)
             quick: If True, use a reduced parameter grid
+            enable_face_detection: Include face clustering features in keyword indexing
+            enable_object_detection: Include object detection features in keyword indexing
 
         Returns:
             List of WAVGridSearchResult sorted by exact match accuracy
@@ -508,7 +514,9 @@ class WAVGridSearch:
             prompt_modes=prompt_modes,
             candidate_pool_sizes=candidate_pool_sizes,
             keyword_weights=keyword_weights,
-            llm_model=llm_model
+            llm_model=llm_model,
+            enable_face_detection=enable_face_detection,
+            enable_object_detection=enable_object_detection
         )
 
         # Pre-generate LLM prompts if needed
@@ -813,7 +821,9 @@ Examples:
         candidate_pool_sizes=args.pool_sizes,
         keyword_weights=args.keyword_weights,
         llm_model=args.llm_model,
-        quick=args.quick
+        quick=args.quick,
+        enable_face_detection=not args.no_face_detection,
+        enable_object_detection=not args.no_object_detection
     )
 
     if results:

@@ -14,7 +14,10 @@ of each segment text, optimized for CLIP's text-image matching.
 
 import json
 import logging
+import os
+import shutil
 import subprocess
+import time
 import re
 from typing import List, Dict, Optional
 from pathlib import Path
@@ -75,27 +78,89 @@ Example output: ["jump cut to fully baked golden food being pulled out of the ov
         
         logger.info(f"PromptGenerator initialized: model={model_name}, variations={num_variations}")
     
-    def check_ollama_available(self) -> bool:
-        """Check if Ollama is running and the model is available."""
+    def _ollama_command(self) -> Optional[str]:
+        """Return the Ollama executable path if it can be found."""
+        configured = os.environ.get('OLLAMA_COMMAND')
+        candidates = [configured] if configured else []
+        candidates.extend([
+            shutil.which('ollama'),
+            '/usr/local/bin/ollama',
+            '/usr/bin/ollama',
+            '/opt/homebrew/bin/ollama',
+            '/data/giannis_pantrakis/ollama-bin/bin/ollama',
+            str(Path.home() / '.local' / 'bin' / 'ollama'),
+        ])
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
+                return candidate
+        return None
+
+    def _start_ollama_server(self) -> bool:
+        """Start a local Ollama server if the binary is available."""
+        if os.environ.get('VIDEO_SEQUENCER_OLLAMA_AUTOSTART', '1').lower() in {'0', 'false', 'no'}:
+            logger.info('Ollama autostart disabled by VIDEO_SEQUENCER_OLLAMA_AUTOSTART')
+            return False
+
+        command = self._ollama_command()
+        if not command:
+            logger.warning('Ollama is not running and no ollama executable was found in PATH/common locations')
+            return False
+
+        log_path = Path(os.environ.get('OLLAMA_AUTOSTART_LOG', 'webapp/state/ollama.log'))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Starting Ollama server with '{command} serve' (log: {log_path})")
+        with open(log_path, 'ab') as log_file:
+            subprocess.Popen(
+                [command, 'serve'],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        return self._wait_for_ollama(timeout_seconds=30)
+
+    def _wait_for_ollama(self, timeout_seconds: int = 30) -> bool:
+        import requests
+
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                response = requests.get(f"{self.ollama_host}/api/tags", timeout=2)
+                if response.status_code == 200:
+                    return True
+            except Exception:
+                time.sleep(1)
+        logger.warning(f"Ollama did not become available within {timeout_seconds}s")
+        return False
+
+    def check_ollama_available(self, auto_start: bool = True) -> bool:
+        """Check if Ollama is running and the requested model is available."""
         try:
             import requests
             response = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
-            if response.status_code == 200:
-                models = response.json().get('models', [])
-                model_names = [m.get('name', '') for m in models]
-                if any(self.model_name in name for name in model_names):
-                    return True
-                else:
-                    logger.warning(
-                        f"Model '{self.model_name}' not found in Ollama. "
-                        f"Available models: {model_names}. "
-                        f"Run: ollama pull {self.model_name}"
-                    )
-                    return False
-            return False
         except Exception as e:
             logger.warning(f"Ollama not available: {e}")
+            if auto_start and self._start_ollama_server():
+                return self.check_ollama_available(auto_start=False)
             return False
+
+        if response.status_code != 200:
+            logger.warning(f"Ollama tags API returned status {response.status_code}")
+            if auto_start and self._start_ollama_server():
+                return self.check_ollama_available(auto_start=False)
+            return False
+
+        models = response.json().get('models', [])
+        model_names = [m.get('name', '') for m in models]
+        if any(self.model_name in name for name in model_names):
+            return True
+
+        logger.warning(
+            f"Model '{self.model_name}' not found in Ollama. "
+            f"Available models: {model_names}. "
+            f"Run: ollama pull {self.model_name}"
+        )
+        return False
     
     def generate_prompts(self, text: str) -> List[str]:
         """

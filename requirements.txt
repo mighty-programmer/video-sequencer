@@ -50,6 +50,7 @@ pyyaml>=5.4.0
 # Optional Write-A-Video keyword indexing extras
 # ultralytics>=8.2.0
 # deepface>=0.0.92
+# tf-keras>=2.21.0  # Required by DeepFace with TensorFlow 2.21+
 
 # Note: VideoPrism must be installed separately from source
 # Clone: git clone https://github.com/google-deepmind/videoprism.git
