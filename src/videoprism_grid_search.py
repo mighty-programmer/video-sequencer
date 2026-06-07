@@ -332,21 +332,11 @@ class VideoPrismGridSearch:
                 indexer = VideoIndexer(
                     model_name=config.model_name,
                     index_dir=cache_dir,
-                    device=self.device
+                    device=self.device,
+                    num_frames=config.num_frames,
+                    resolution=config.resolution,
                 )
                 self._indexer_cache[cache_key] = indexer
-            
-            # Override the default num_frames and resolution for frame extraction
-            original_extract_frames = indexer.extract_frames
-            
-            def patched_extract_frames(video_path, num_frames=config.num_frames,
-                                       target_size=(config.resolution, config.resolution), start_time=0.0, end_time=-1.0):
-                return original_extract_frames(
-                    video_path, num_frames=num_frames,
-                    target_size=target_size, start_time=start_time, end_time=end_time
-                )
-            
-            indexer.extract_frames = patched_extract_frames
             
             # Try to load cached index
             t_index_start = time.time()

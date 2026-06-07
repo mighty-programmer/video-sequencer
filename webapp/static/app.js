@@ -6,6 +6,7 @@ const state = {
   jobs: [],
   sessions: [],
   currentSession: null,
+  bestGridSearch: null,
   activeSegmentId: null,
   selectedJobId: null,
   movementPreference: "auto",
@@ -144,26 +145,32 @@ function renderBenchmarks() {
 function renderCache() {
   const list = $("cacheList");
   if (!list || !state.cache) return;
-  list.innerHTML = `
+  const sections = [
+    state.cache.cache || {
+      label: "Cache",
+      dir: state.cache.cache_dir,
+      total_size_mb: state.cache.total_size_mb,
+      entries: state.cache.entries || [],
+    },
+    state.cache.output,
+  ].filter(Boolean);
+
+  list.innerHTML = sections.map((section) => `
     <div class="cache-item">
       <div>
-        <strong>${state.cache.cache_dir}</strong>
-        <div class="muted">${state.cache.total_size_mb} MB total</div>
+        <strong>${section.label}: ${section.dir}</strong>
+        <div class="muted">${section.total_size_mb} MB total · ${(section.entries || []).length} entries</div>
       </div>
     </div>
-  `;
-
-  state.cache.entries.forEach((entry) => {
-    const item = document.createElement("div");
-    item.className = "cache-item";
-    item.innerHTML = `
-      <div>
-        <strong>${entry.name}</strong>
-        <div class="muted">${entry.type} · ${entry.size_mb} MB</div>
+    ${(section.entries || []).map((entry) => `
+      <div class="cache-item subitem">
+        <div>
+          <strong>${entry.name}</strong>
+          <div class="muted">${entry.type} · ${entry.size_mb} MB</div>
+        </div>
       </div>
-    `;
-    list.appendChild(item);
-  });
+    `).join("")}
+  `).join("");
 }
 
 function renderJobs() {
@@ -209,6 +216,66 @@ function renderSettings() {
   $("settingCache").value = state.settings.cache_dir || "";
   $("settingBenchmarksDir").value = state.settings.benchmarks_dir || "";
   $("settingHostname").value = state.settings.server_hostname || "";
+}
+
+
+function compactGridValue(value) {
+  if (value === null || value === undefined) return "n/a";
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function renderBestGridConfig(source = state.bestGridSearch) {
+  const target = $("bestGridStatus");
+  if (!target) return;
+
+  if (!source) {
+    target.innerHTML = "Best grid-search settings will be applied automatically when a benchmark result exists.";
+    return;
+  }
+
+  if (source.missing) {
+    target.innerHTML = `<strong>Best grid-search settings:</strong> ${source.message || "No saved result found yet."}`;
+    return;
+  }
+
+  const config = source.config || {};
+  const fields = [
+    ["Model", config.model_name],
+    ["Frames", config.num_frames],
+    ["Aggregation", config.aggregation],
+    ["Prompt", config.prompt_mode || source.prompt_mode],
+    ["Pool", config.candidate_pool_size],
+    ["Keyword", config.keyword_weight],
+    ["Objects", config.enable_object_detection],
+    ["Faces", config.enable_face_detection],
+    ["Resolution", config.resolution],
+    ["Dual softmax", config.use_dual_softmax],
+  ].filter(([, value]) => value !== undefined && value !== null);
+
+  target.innerHTML = `
+    <strong>Best grid-search settings:</strong>
+    <span>${fields.map(([label, value]) => `${label}: ${compactGridValue(value)}`).join(" · ")}</span>
+    <span class="muted">Exact match ${Number(source.exact_match_accuracy || 0).toFixed(2)}%${source.source_label ? ` · ${source.source_label}` : ""}</span>
+  `;
+}
+
+async function refreshBestGridConfig() {
+  const benchmark = $("sessionBenchmark")?.value;
+  const retrievalMode = $("sessionMode")?.value || "writeavideo";
+  if (!benchmark) {
+    state.bestGridSearch = null;
+    renderBestGridConfig();
+    return;
+  }
+  try {
+    state.bestGridSearch = await api(`/api/grid-search/best?benchmark=${encodeURIComponent(benchmark)}&retrieval_mode=${encodeURIComponent(retrievalMode)}`);
+    renderBestGridConfig();
+  } catch (error) {
+    state.bestGridSearch = { missing: true, message: error.message };
+    renderBestGridConfig();
+  }
 }
 
 function renderServerStatus() {
@@ -313,6 +380,7 @@ function renderEditor() {
 
   workspace.classList.remove("hidden");
   const session = state.currentSession;
+  renderBestGridConfig(session.config?.best_grid_search || state.bestGridSearch);
   const segments = session.segments || [];
   if (state.activeSegmentId == null && segments.length) {
     state.activeSegmentId = segments[0].segment_id;
@@ -516,6 +584,7 @@ async function createSession() {
       enable_object_detection: $("sessionMode").value === "writeavideo" && $("sessionObjects").checked,
       enable_face_detection: $("sessionMode").value === "writeavideo" && $("sessionFaces").checked,
       exact_matching_mode: $("sessionExactMatching")?.checked || false,
+      use_best_grid_search: true,
     };
     const session = await api("/api/editor/sessions", {
       method: "POST",
@@ -523,6 +592,8 @@ async function createSession() {
     });
     state.currentSession = session;
     state.activeSegmentId = session.segments[0]?.segment_id ?? null;
+    state.bestGridSearch = session.config?.best_grid_search || state.bestGridSearch;
+    renderBestGridConfig(state.bestGridSearch);
     setStatus("editorStatus", "Editing session ready.");
     await refreshBootstrap();
     renderEditor();
@@ -779,8 +850,14 @@ function bindEvents() {
   });
 
   $("refreshAll").addEventListener("click", refreshBootstrap);
-  $("sessionMode").addEventListener("change", updateSessionModeControls);
-  $("sessionBenchmark").addEventListener("change", updateSessionModeControls);
+  $("sessionMode").addEventListener("change", () => {
+    updateSessionModeControls();
+    refreshBestGridConfig();
+  });
+  $("sessionBenchmark").addEventListener("change", () => {
+    updateSessionModeControls();
+    refreshBestGridConfig();
+  });
   $("sessionSegments").addEventListener("input", updateSessionModeControls);
   $("createSession").addEventListener("click", createSession);
   $("refreshSessions").addEventListener("click", refreshBootstrap);
@@ -828,6 +905,7 @@ async function initialize() {
   updateSessionModeControls();
   await refreshBootstrap();
   updateSessionModeControls();
+  await refreshBestGridConfig();
   renderEditor();
   setInterval(refreshJobsOnly, 4000);
 }

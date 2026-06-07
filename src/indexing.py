@@ -83,7 +83,9 @@ class VideoIndexer:
         self,
         model_name: str = 'videoprism_lvt_public_v1_base',
         index_dir: str = './video_index',
-        device: str = 'cuda:0'
+        device: str = 'cuda:0',
+        num_frames: int = 16,
+        resolution: int = 288,
     ):
         """
         Initialize the VideoIndexer with LVT model.
@@ -92,11 +94,16 @@ class VideoIndexer:
             model_name: VideoPrism LVT model to use (must be an LVT model for text matching)
             index_dir: Directory to store the FAISS index and metadata
             device: Device to use ('cuda:0', 'cuda:1', etc., or 'cpu')
+            num_frames: Number of uniformly sampled frames to feed to VideoPrism
+            resolution: Square input resolution for extracted RGB frames
         """
         self.model_name = model_name
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
+        self.num_frames = int(num_frames)
+        self.resolution = int(resolution)
+        self.target_size = (self.resolution, self.resolution)
         
         # Ensure we're using an LVT model
         if 'lvt' not in model_name.lower():
@@ -141,13 +148,16 @@ class VideoIndexer:
         self.metadata_list: List[VideoMetadata] = []
         self.video_id_to_idx: Dict[str, int] = {}
         
-        logger.info("VideoIndexer initialized successfully with LVT model")
+        logger.info(
+            "VideoIndexer initialized successfully with LVT model "
+            f"(num_frames={self.num_frames}, resolution={self.resolution})"
+        )
     
     def extract_frames(
         self,
         video_path: str,
-        num_frames: int = 16,
-        target_size: Tuple[int, int] = (288, 288),
+        num_frames: Optional[int] = None,
+        target_size: Optional[Tuple[int, int]] = None,
         start_time: float = 0.0,
         end_time: float = -1.0
     ) -> Tuple[np.ndarray, Dict]:
@@ -156,14 +166,17 @@ class VideoIndexer:
         
         Args:
             video_path: Path to the video file
-            num_frames: Number of frames to extract (default 16 for VideoPrism-B)
-            target_size: Target frame size (height, width) - must be 288x288 for VideoPrism
+            num_frames: Number of frames to extract (defaults to self.num_frames)
+            target_size: Target frame size (height, width; defaults to configured resolution)
             start_time: Start time in seconds for windowed extraction (default: 0.0)
             end_time: End time in seconds for windowed extraction (default: -1.0 = full video)
         
         Returns:
             Tuple of (frames array, video info dict)
         """
+        num_frames = int(num_frames or self.num_frames)
+        target_size = target_size or self.target_size
+
         cap = cv2.VideoCapture(video_path)
         
         if not cap.isOpened():
@@ -526,7 +539,9 @@ class VideoIndexer:
             json.dump({
                 'metadata': metadata_dicts,
                 'video_id_to_idx': self.video_id_to_idx,
-                'model_name': self.model_name
+                'model_name': self.model_name,
+                'num_frames': self.num_frames,
+                'resolution': self.resolution,
             }, f, indent=2)
         logger.info(f"Saved metadata to {metadata_path}")
     
@@ -543,11 +558,26 @@ class VideoIndexer:
         with open(metadata_path, 'r') as f:
             data = json.load(f)
         
-        # Check if index was created with LVT model
+        # Check if index was created with compatible VideoPrism settings.
         saved_model = data.get('model_name', '')
         if 'lvt' not in saved_model.lower():
             logger.warning(f"Existing index was created with non-LVT model ({saved_model}). "
                           f"Re-indexing required for text-video matching.")
+            return False
+        if saved_model and saved_model != self.model_name:
+            logger.warning(
+                "Existing VideoPrism index model differs "
+                f"({saved_model} != {self.model_name}). Re-indexing required."
+            )
+            return False
+        saved_num_frames = int(data.get('num_frames', 16))
+        saved_resolution = int(data.get('resolution', 288))
+        if saved_num_frames != self.num_frames or saved_resolution != self.resolution:
+            logger.warning(
+                "Existing VideoPrism index settings differ "
+                f"({saved_num_frames}f/{saved_resolution}p != {self.num_frames}f/{self.resolution}p). "
+                "Re-indexing required."
+            )
             return False
         
         # Load FAISS index

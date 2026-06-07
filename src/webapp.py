@@ -26,6 +26,7 @@ from web_backend import (
     cache_manager,
     editor_manager,
     job_manager,
+    load_best_grid_search_config,
     server_control_manager,
     settings_store,
 )
@@ -65,7 +66,7 @@ def bootstrap() -> Dict[str, Any]:
         "settings": settings,
         "server": server_control_manager.status(settings),
         "benchmarks": benchmark_manager.list(settings.get("benchmarks_dir", "./data/benchmarks")),
-        "cache": cache_manager.inspect(settings.get("cache_dir", "./cache")),
+        "cache": cache_manager.inspect(settings.get("cache_dir", "./cache"), settings.get("output", "./output")),
         "jobs": job_manager.list_jobs(),
         "sessions": editor_manager.list_sessions(),
     }
@@ -118,14 +119,28 @@ def restart_server() -> Dict[str, Any]:
 @app.get("/api/cache")
 def get_cache() -> Dict[str, Any]:
     settings = settings_store.load()
-    return cache_manager.inspect(settings.get("cache_dir", "./cache"))
+    return cache_manager.inspect(settings.get("cache_dir", "./cache"), settings.get("output", "./output"))
+
+
+@app.get("/api/grid-search/best")
+def get_best_grid_search(benchmark: str, retrieval_mode: str) -> Dict[str, Any]:
+    settings = settings_store.load()
+    best = load_best_grid_search_config(settings.get("output", "./output"), benchmark, retrieval_mode)
+    if best:
+        return best
+    return {
+        "missing": True,
+        "benchmark": benchmark,
+        "retrieval_mode": retrieval_mode,
+        "message": "No saved grid-search result was found for this benchmark and retrieval mode.",
+    }
 
 
 @app.post("/api/cache/clear")
 def clear_cache(request: DictPayload) -> Dict[str, Any]:
     settings = settings_store.load()
     action = request.payload.get("action", "all")
-    return cache_manager.clear(settings.get("cache_dir", "./cache"), action)
+    return cache_manager.clear(settings.get("cache_dir", "./cache"), action, settings.get("output", "./output"))
 
 
 @app.get("/api/benchmarks")

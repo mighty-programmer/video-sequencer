@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Sequencer Studio</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260606-session-controls" />
+    <link rel="stylesheet" href="/static/app.css?v=20260607-best-grid" />
   </head>
   <body>
     <div class="shell">
@@ -109,6 +109,7 @@
               <button class="primary" id="createSession">Create Editing Session</button>
               <button class="ghost" id="refreshSessions">Reload Sessions</button>
             </div>
+            <div class="status best-grid-status" id="bestGridStatus"></div>
             <div class="status" id="editorStatus"></div>
           </div>
 
@@ -338,7 +339,10 @@
                 <button class="ghost cache-action" data-cache-action="openclip-grid">Clear OpenCLIP Grid Cache</button>
                 <button class="ghost cache-action" data-cache-action="videoprism-grid">Clear VideoPrism Grid Cache</button>
                 <button class="ghost cache-action" data-cache-action="write-a-video-grid">Clear Write-A-Video Cache</button>
+                <button class="ghost cache-action" data-cache-action="benchmark-output">Clear Benchmark Outputs</button>
+                <button class="ghost cache-action" data-cache-action="generated-output">Clear All Generated Outputs</button>
                 <button class="primary cache-action" data-cache-action="all">Clear All Cache</button>
+                <button class="primary danger cache-action" data-cache-action="all-workspace">Clear Cache + Generated Outputs</button>
               </div>
               <div id="cacheList" class="stack compact"></div>
             </div>
@@ -353,6 +357,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260606-session-controls" type="module"></script>
+    <script src="/static/app.js?v=20260607-best-grid" type="module"></script>
   </body>
 </html>

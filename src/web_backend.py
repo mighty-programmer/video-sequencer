@@ -38,10 +38,10 @@ import numpy as np
 
 from assembly import VideoAssembler, VideoSequenceBuilder
 from main import load_manual_segments
-from matching import ClipSelection, VideoTextMatcher
+from matching import ClipSelection, EnsembleVideoTextMatcher, PromptedVideoTextMatcher, VideoTextMatcher
 from menu import discover_benchmark_numbers
 from models import VideoMetadata
-from openclip_indexing import OpenCLIPTextMatcher, OpenCLIPVideoIndexer
+from openclip_indexing import DEFAULT_ENSEMBLE_TEMPLATES, OpenCLIPTextMatcher, OpenCLIPVideoIndexer, PROMPT_TEMPLATES
 from server_runtime import (
     SERVER_LOG_FILE,
     SERVER_PORT,
@@ -396,12 +396,25 @@ if {json.dumps(action)} == "restart":
 
 
 class CacheManager:
-    def inspect(self, cache_dir: str) -> Dict[str, Any]:
-        cache_path = (PROJECT_ROOT / cache_dir).resolve() if not Path(cache_dir).is_absolute() else Path(cache_dir)
+    OUTPUT_BENCHMARK_PREFIXES = ("benchmark_", "comparison_")
+    OUTPUT_BENCHMARK_NAMES = {
+        "benchmark_results",
+        "comparison_multi",
+        "grid_search",
+        "openclip_grid_search",
+        "videoprism_grid_search",
+        "wav_grid_search",
+    }
+
+    def _resolve_project_path(self, value: str) -> Path:
+        path = Path(value)
+        return (PROJECT_ROOT / path).resolve() if not path.is_absolute() else path.resolve()
+
+    def _inspect_dir(self, path: Path, label: str) -> Dict[str, Any]:
         entries = []
         total_size = 0
-        if cache_path.exists():
-            for item in sorted(cache_path.iterdir()):
+        if path.exists():
+            for item in sorted(path.iterdir()):
                 size = _dir_size(item)
                 total_size += size
                 entries.append(
@@ -414,15 +427,51 @@ class CacheManager:
                     }
                 )
         return {
-            "cache_dir": str(cache_path),
-            "exists": cache_path.exists(),
+            "label": label,
+            "dir": str(path),
+            "exists": path.exists(),
             "total_size_bytes": total_size,
             "total_size_mb": _bytes_to_mb(total_size),
             "entries": entries,
         }
 
-    def clear(self, cache_dir: str, action: str) -> Dict[str, Any]:
-        cache_path = (PROJECT_ROOT / cache_dir).resolve() if not Path(cache_dir).is_absolute() else Path(cache_dir)
+    def inspect(self, cache_dir: str, output_dir: str = "./output") -> Dict[str, Any]:
+        cache_path = self._resolve_project_path(cache_dir)
+        output_path = self._resolve_project_path(output_dir)
+        cache = self._inspect_dir(cache_path, "Cache")
+        output = self._inspect_dir(output_path, "Generated outputs")
+        return {
+            "cache_dir": cache["dir"],
+            "exists": cache["exists"],
+            "total_size_bytes": cache["total_size_bytes"],
+            "total_size_mb": cache["total_size_mb"],
+            "entries": cache["entries"],
+            "cache": cache,
+            "output": output,
+            "total_workspace_size_bytes": cache["total_size_bytes"] + output["total_size_bytes"],
+            "total_workspace_size_mb": _bytes_to_mb(cache["total_size_bytes"] + output["total_size_bytes"]),
+        }
+
+    def _safe_remove(self, path: Path, cleared: List[str]) -> None:
+        if not path.exists():
+            return
+        resolved = path.resolve()
+        if resolved == PROJECT_ROOT:
+            raise ValueError("Refusing to remove the project root.")
+        if PROJECT_ROOT not in resolved.parents:
+            raise ValueError(f"Refusing to remove path outside project root: {resolved}")
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        cleared.append(str(resolved))
+
+    def _is_benchmark_output(self, item: Path) -> bool:
+        return item.name.startswith(self.OUTPUT_BENCHMARK_PREFIXES) or item.name in self.OUTPUT_BENCHMARK_NAMES
+
+    def clear(self, cache_dir: str, action: str, output_dir: str = "./output") -> Dict[str, Any]:
+        cache_path = self._resolve_project_path(cache_dir)
+        output_path = self._resolve_project_path(output_dir)
         cleared: List[str] = []
         prefix_map = {
             "openclip-grid": "gs_",
@@ -432,26 +481,37 @@ class CacheManager:
 
         if action == "all":
             if cache_path.exists():
-                shutil.rmtree(cache_path)
-                cleared.append(str(cache_path))
+                self._safe_remove(cache_path, cleared)
+        elif action == "all-workspace":
+            if cache_path.exists():
+                self._safe_remove(cache_path, cleared)
+            if output_path.exists():
+                for item in list(output_path.iterdir()):
+                    self._safe_remove(item, cleared)
+        elif action == "generated-output":
+            if output_path.exists():
+                for item in list(output_path.iterdir()):
+                    self._safe_remove(item, cleared)
+        elif action == "benchmark-output":
+            if output_path.exists():
+                for item in list(output_path.iterdir()):
+                    if self._is_benchmark_output(item):
+                        self._safe_remove(item, cleared)
         elif action == "videoprism-index":
             target = cache_path / "video_index"
-            if target.exists():
-                shutil.rmtree(target)
-                cleared.append(str(target))
+            self._safe_remove(target, cleared)
         elif action == "openclip-index":
             target = cache_path / "video_index_openclip"
-            if target.exists():
-                shutil.rmtree(target)
-                cleared.append(str(target))
+            self._safe_remove(target, cleared)
         elif action in prefix_map:
             prefix = prefix_map[action]
             if cache_path.exists():
-                for item in cache_path.iterdir():
+                for item in list(cache_path.iterdir()):
                     if item.is_dir() and item.name.startswith(prefix):
-                        shutil.rmtree(item)
-                        cleared.append(str(item))
-        return {"cleared": cleared, "cache": self.inspect(cache_dir)}
+                        self._safe_remove(item, cleared)
+        else:
+            raise ValueError(f"Unsupported cache/output clear action: {action}")
+        return {"cleared": cleared, "cache": self.inspect(cache_dir, output_dir)}
 
 
 class BenchmarkManager:
@@ -675,6 +735,155 @@ def resolve_benchmark_paths(benchmark_number: str, benchmarks_dir: str) -> Dict[
         "ground_truth": str(ground_truth) if ground_truth.exists() else None,
         "audio": audio,
     }
+
+
+VIDEOPRISM_PROMPT_TEMPLATES = {
+    "none": "{}",
+    "video": "a video of {}",
+    "photo": "a photo of {}",
+    "scene": "a scene showing {}",
+    "cooking": "a cooking video showing {}",
+    "clip": "a short clip of {}",
+}
+
+VIDEOPRISM_ENSEMBLE_TEMPLATES = [
+    "{}",
+    "a video of {}",
+    "a photo of {}",
+    "a scene showing {}",
+    "a short clip of {}",
+]
+
+
+def _normalize_benchmark_id(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    match = re.search(r"(\d+)", str(value))
+    return match.group(1) if match else str(value)
+
+
+def _best_result_from_file(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        payload = _read_json(path, {})
+    except Exception as exc:
+        logger.warning("Could not read grid-search result %s: %s", path, exc)
+        return None
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        return None
+
+    def score(item: Dict[str, Any]) -> float:
+        try:
+            return float(item.get("exact_match_accuracy", -1.0))
+        except (TypeError, ValueError):
+            return -1.0
+
+    best = max((item for item in results if isinstance(item, dict)), key=score, default=None)
+    if not best:
+        return None
+
+    normalized = copy.deepcopy(best)
+    normalized["source_file"] = str(path)
+    normalized["source_label"] = _safe_relpath(path, PROJECT_ROOT)
+    return normalized
+
+
+def _grid_search_result_paths(output_dir: str, benchmark: Any, retrieval_mode: str) -> List[Path]:
+    benchmark_id = _normalize_benchmark_id(benchmark)
+    if not benchmark_id:
+        return []
+    output_path = Path(_resolve_path(output_dir) or output_dir)
+    mode = str(retrieval_mode or "writeavideo").lower()
+    if mode == "openclip":
+        filenames = ["openclip/grid_search_results.json"]
+    elif mode == "videoprism":
+        filenames = ["videoprism/videoprism_grid_search_results.json"]
+    else:
+        filenames = ["wav/wav_grid_search_results.json"]
+
+    roots = [
+        output_path / f"benchmark_{benchmark_id}",
+        output_path / f"comparison_b{benchmark_id}",
+        output_path / "comparison_multi" / f"benchmark_{benchmark_id}",
+    ]
+    return [root / filename for root in roots for filename in filenames]
+
+
+def _prompt_settings_for_grid_config(retrieval_mode: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    prompt_mode = config.get("prompt_mode") or "none"
+    settings: Dict[str, Any] = {"prompt_mode": prompt_mode, "prompt_template": None, "ensemble_prompts": None}
+
+    if prompt_mode.startswith("template:"):
+        key = prompt_mode.split(":", 1)[1]
+        if retrieval_mode == "videoprism":
+            settings["prompt_template"] = VIDEOPRISM_PROMPT_TEMPLATES.get(key)
+        else:
+            settings["prompt_template"] = PROMPT_TEMPLATES.get(key)
+    elif prompt_mode.startswith("ensemble"):
+        settings["ensemble_prompts"] = VIDEOPRISM_ENSEMBLE_TEMPLATES if retrieval_mode == "videoprism" else list(DEFAULT_ENSEMBLE_TEMPLATES)
+
+    return settings
+
+
+def load_best_grid_search_config(output_dir: str, benchmark: Any, retrieval_mode: str) -> Optional[Dict[str, Any]]:
+    mode = "writeavideo" if retrieval_mode in {"write-a-video", "wav"} else str(retrieval_mode or "writeavideo").lower()
+    candidates = []
+    for path in _grid_search_result_paths(output_dir, benchmark, mode):
+        result = _best_result_from_file(path)
+        if result:
+            candidates.append(result)
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda item: float(item.get("exact_match_accuracy", -1.0)))
+    config = copy.deepcopy(best.get("config", {}))
+    prompt_settings = _prompt_settings_for_grid_config(mode, config)
+    return {
+        "benchmark": _normalize_benchmark_id(benchmark),
+        "retrieval_mode": mode,
+        "source_file": best.get("source_file"),
+        "source_label": best.get("source_label"),
+        "exact_match_accuracy": best.get("exact_match_accuracy"),
+        "top_3_accuracy": best.get("top_3_accuracy"),
+        "top_5_accuracy": best.get("top_5_accuracy"),
+        "mrr": best.get("mrr"),
+        "config": config,
+        **prompt_settings,
+    }
+
+
+def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any], retrieval_mode: str) -> Dict[str, Any]:
+    grid_config = copy.deepcopy(best.get("config", {}))
+    mode = best.get("retrieval_mode") or retrieval_mode
+
+    if grid_config.get("model_name"):
+        if mode == "videoprism":
+            config["videoprism_model"] = grid_config["model_name"]
+        else:
+            config["openclip_model"] = grid_config["model_name"]
+
+    for source_key, target_key in [
+        ("num_frames", "num_frames"),
+        ("aggregation", "aggregation"),
+        ("resolution", "videoprism_resolution"),
+        ("use_dual_softmax", "use_dual_softmax"),
+        ("candidate_pool_size", "candidate_pool_size"),
+        ("keyword_weight", "keyword_weight"),
+        ("enable_face_detection", "enable_face_detection"),
+        ("enable_object_detection", "enable_object_detection"),
+    ]:
+        if source_key in grid_config:
+            config[target_key] = grid_config[source_key]
+
+    config["prompt_mode"] = best.get("prompt_mode", grid_config.get("prompt_mode", "none"))
+    config["prompt_template"] = best.get("prompt_template")
+    config["ensemble_prompts"] = best.get("ensemble_prompts")
+    config["exact_matching_mode"] = True
+    config["best_grid_search"] = copy.deepcopy(best)
+    return config
 
 
 def _available_cuda_devices(limit: int = 3) -> Optional[str]:
@@ -915,25 +1124,44 @@ class EditorSessionManager:
             output_dir=str(output_dir),
             cache_dir=str(cache_dir),
             retrieval_mode=retrieval_mode,
-            config={
-                "gpu_device": payload.get("gpu_device") or settings.get("gpu_device", "cuda:0"),
-                "llm_model": payload.get("llm_model") or settings.get("llm_model", "meta-llama/Llama-3.2-3B-Instruct"),
-                "whisper_model": payload.get("whisper_model") or settings.get("whisper_model", "base"),
-                "openclip_model": payload.get("openclip_model") or settings.get("openclip_model", "ViT-B-32"),
-                "videoprism_model": payload.get("videoprism_model", "videoprism_lvt_public_v1_large"),
-                "exact_matching_mode": payload.get("exact_matching_mode", False),
-                "windowing": not payload.get("no_windowing", True),
-                "window_size": payload.get("window_size", 5.0),
-                "window_overlap": payload.get("window_overlap", 0.5),
-                "candidate_pool_size": payload.get("candidate_pool_size", 10),
-                "keyword_weight": payload.get("keyword_weight", 0.2) if enable_keyword_index else 0.0,
-                "enable_object_detection": bool(payload.get("enable_object_detection", True)) if enable_keyword_index else False,
-                "enable_face_detection": bool(payload.get("enable_face_detection", False)) if enable_keyword_index else False,
-                "yolo_model": payload.get("yolo_model", "yolov8n"),
-                "frames_per_second": payload.get("frames_per_second", 1.0),
-            },
+            config={},
             segments=segments,
         )
+
+        session.config = {
+            "gpu_device": payload.get("gpu_device") or settings.get("gpu_device", "cuda:0"),
+            "llm_model": payload.get("llm_model") or settings.get("llm_model", "meta-llama/Llama-3.2-3B-Instruct"),
+            "whisper_model": payload.get("whisper_model") or settings.get("whisper_model", "base"),
+            "openclip_model": payload.get("openclip_model") or settings.get("openclip_model", "ViT-B-32"),
+            "videoprism_model": payload.get("videoprism_model", "videoprism_lvt_public_v1_large"),
+            "exact_matching_mode": bool(payload.get("exact_matching_mode", False)),
+            "windowing": not payload.get("no_windowing", True),
+            "window_size": payload.get("window_size", 5.0),
+            "window_overlap": payload.get("window_overlap", 0.5),
+            "candidate_pool_size": payload.get("candidate_pool_size", 10),
+            "keyword_weight": payload.get("keyword_weight", 0.2) if enable_keyword_index else 0.0,
+            "enable_object_detection": bool(payload.get("enable_object_detection", True)) if enable_keyword_index else False,
+            "enable_face_detection": bool(payload.get("enable_face_detection", False)) if enable_keyword_index else False,
+            "yolo_model": payload.get("yolo_model", "yolov8n"),
+            "frames_per_second": payload.get("frames_per_second", 1.0),
+            "num_frames": payload.get("num_frames", 16),
+            "aggregation": payload.get("aggregation", "mean"),
+            "prompt_mode": payload.get("prompt_mode", "none"),
+            "prompt_template": payload.get("prompt_template"),
+            "ensemble_prompts": payload.get("ensemble_prompts"),
+            "use_best_grid_search": bool(payload.get("use_best_grid_search", True)),
+        }
+        if benchmark and session.config["use_best_grid_search"]:
+            best_grid = load_best_grid_search_config(settings.get("output", "./output"), benchmark, retrieval_mode)
+            if best_grid:
+                _apply_best_grid_search_config(session.config, best_grid, retrieval_mode)
+            else:
+                session.config["best_grid_search"] = {
+                    "missing": True,
+                    "benchmark": _normalize_benchmark_id(benchmark),
+                    "retrieval_mode": retrieval_mode,
+                    "message": "No saved grid-search result was found for this benchmark and retrieval mode.",
+                }
 
         runtime = EditorRuntime(session=session, session_dir=session_dir)
         try:
@@ -1180,11 +1408,29 @@ class EditorSessionManager:
                 model_name=session.config.get("videoprism_model", "videoprism_lvt_public_v1_base"),
                 index_dir=str(index_dir),
                 device=gpu_device,
+                num_frames=int(session.config.get("num_frames", 16)),
+                resolution=int(session.config.get("videoprism_resolution", 288)),
             )
             if not indexer.load_index():
                 indexer.index_videos(session.video_dir, use_windowing=use_windowing, window_size=window_size, window_overlap=window_overlap)
             runtime.indexer = indexer
-            runtime.matcher = VideoTextMatcher(indexer, model_name=session.config.get("videoprism_model", "videoprism_lvt_public_v1_base"), device=gpu_device)
+            matcher_kwargs = {
+                "video_indexer": indexer,
+                "model_name": session.config.get("videoprism_model", "videoprism_lvt_public_v1_base"),
+                "device": gpu_device,
+            }
+            if session.config.get("ensemble_prompts"):
+                runtime.matcher = EnsembleVideoTextMatcher(
+                    **matcher_kwargs,
+                    ensemble_templates=session.config.get("ensemble_prompts"),
+                )
+            elif session.config.get("prompt_template"):
+                runtime.matcher = PromptedVideoTextMatcher(
+                    **matcher_kwargs,
+                    prompt_template=session.config.get("prompt_template"),
+                )
+            else:
+                runtime.matcher = VideoTextMatcher(**matcher_kwargs)
             runtime.keyword_indexer = None
             return
 
@@ -1194,11 +1440,17 @@ class EditorSessionManager:
                 model_name=session.config.get("openclip_model", "ViT-B-32"),
                 index_dir=str(index_dir),
                 device=gpu_device,
+                num_frames=int(session.config.get("num_frames", 16)),
+                aggregation=session.config.get("aggregation", "mean"),
             )
             if not indexer.load_index():
                 indexer.index_videos(session.video_dir, use_windowing=use_windowing, window_size=window_size, window_overlap=window_overlap)
             runtime.indexer = indexer
-            runtime.matcher = OpenCLIPTextMatcher(indexer)
+            runtime.matcher = OpenCLIPTextMatcher(
+                indexer,
+                prompt_template=session.config.get("prompt_template"),
+                ensemble_prompts=session.config.get("ensemble_prompts"),
+            )
             runtime.keyword_indexer = None
             return
 
@@ -1220,6 +1472,8 @@ class EditorSessionManager:
             model_name=session.config.get("openclip_model", "ViT-B-32"),
             index_dir=str(cache_dir / "editor_openclip"),
             device=gpu_device,
+            num_frames=int(session.config.get("num_frames", 16)),
+            aggregation=session.config.get("aggregation", "mean"),
         )
         if not openclip_index.load_index():
             openclip_index.index_videos(session.video_dir, use_windowing=use_windowing, window_size=window_size, window_overlap=window_overlap)
@@ -1231,6 +1485,8 @@ class EditorSessionManager:
             openclip_indexer=openclip_index,
             candidate_pool_size=int(session.config.get("candidate_pool_size", 10)),
             keyword_weight=float(session.config.get("keyword_weight", 0.2)),
+            prompt_template=session.config.get("prompt_template"),
+            ensemble_prompts=session.config.get("ensemble_prompts"),
         )
 
     def _load_segments(
