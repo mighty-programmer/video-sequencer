@@ -518,6 +518,15 @@ class VideoIndexer:
                 results.append((metadata.video_id, float(similarity), metadata))
         
         return results
+
+    def get_all_embeddings(self) -> np.ndarray:
+        """Return indexed video embeddings in metadata order without re-encoding videos."""
+        if self.index is None:
+            raise RuntimeError("Index not initialized. Call index_videos() or load_index() first.")
+        vectors = []
+        for idx in range(len(self.metadata_list)):
+            vectors.append(self.index.reconstruct(idx))
+        return np.vstack(vectors).astype(np.float32) if vectors else np.empty((0, 0), dtype=np.float32)
     
     def save_index(self):
         """Save the FAISS index and metadata to disk"""

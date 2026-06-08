@@ -203,6 +203,14 @@ def get_job(job_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Unknown job.") from exc
 
 
+@app.post("/api/jobs/{job_id}/stop")
+def stop_job(job_id: str) -> Dict[str, Any]:
+    try:
+        return job_manager.stop_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown job.") from exc
+
+
 @app.post("/api/jobs/run/{action}")
 def run_job(action: str, request: DictPayload) -> Dict[str, Any]:
     settings = settings_store.load()

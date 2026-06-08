@@ -21,7 +21,7 @@ Metrics computed:
 import json
 import logging
 from typing import List, Dict, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -40,6 +40,9 @@ class SegmentBenchmarkResult:
     predicted_similarity: float
     ground_truth_rank: int  # Rank of ground truth in predictions (1 = best, -1 = not found)
     reciprocal_rank: float  # 1/rank or 0 if not found
+    final_query: str = ""
+    top_5_retrieved_clip_ids: List[str] = field(default_factory=list)
+    selected_clip_rank: int = -1
 
 
 @dataclass
@@ -72,6 +75,7 @@ class BenchmarkResults:
     exact_matches: int
     mismatches: int
     mismatch_details: List[Dict]
+    assignment_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class BenchmarkEvaluator:
@@ -112,7 +116,8 @@ class BenchmarkEvaluator:
         all_metadata: Optional[List] = None,
         matching_mode: str = 'optimal',
         allow_reuse: bool = True,
-        match_only: bool = False
+        match_only: bool = False,
+        assignment_metadata: Optional[Dict[str, Any]] = None
     ) -> BenchmarkResults:
         """
         Evaluate predictions against ground truth.
@@ -173,43 +178,62 @@ class BenchmarkEvaluator:
             if is_exact:
                 exact_matches += 1
             
-            # Get segment text
-            seg_text = segment_dicts[i]['text'] if i < len(segment_dicts) else ''
+            # Preserve the original script text for evaluation while also exporting
+            # the actual retrieval query used by query-expansion modes.
+            segment_dict = segment_dicts[i] if i < len(segment_dicts) else {}
+            seg_text = segment_dict.get('original_text', segment_dict.get('text', ''))
+            final_query = segment_dict.get('text', seg_text)
             
             # Calculate rank of ground truth in predictions
             gt_rank = -1
+            selected_rank = -1
             reciprocal_rank = 0.0
+            top_5_ids = []
             
-            if similarity_matrix is not None and all_metadata and gt_clip_normalized:
-                # Find the index of ground truth video
-                gt_idx = video_name_to_idx.get(gt_clip_normalized, -1)
-                if gt_idx == -1:
-                    # Try with common variations
-                    for name, idx in video_name_to_idx.items():
-                        if gt_clip_normalized.lower() in name.lower() or name.lower() in gt_clip_normalized.lower():
-                            gt_idx = idx
-                            break
-                
-                if gt_idx >= 0 and i < similarity_matrix.shape[0]:
-                    # Get similarity scores for this segment
+            if similarity_matrix is not None and all_metadata:
+                if i < similarity_matrix.shape[0]:
+                    # Get similarity scores for this segment/query
                     seg_similarities = similarity_matrix[i]
                     # Rank videos by similarity (descending)
                     ranked_indices = np.argsort(seg_similarities)[::-1]
-                    
-                    # Find rank of ground truth
-                    rank_positions = np.where(ranked_indices == gt_idx)[0]
-                    if len(rank_positions) > 0:
-                        gt_rank = int(rank_positions[0]) + 1  # 1-indexed
-                        reciprocal_rank = 1.0 / gt_rank
+                    top_5_ids = [Path(all_metadata[idx].file_path).stem for idx in ranked_indices[:5]]
+
+                    selected_idx = video_name_to_idx.get(predicted_clip, -1)
+                    if selected_idx == -1:
+                        for name, idx in video_name_to_idx.items():
+                            if predicted_clip.lower() in name.lower() or name.lower() in predicted_clip.lower():
+                                selected_idx = idx
+                                break
+                    if selected_idx >= 0:
+                        selected_positions = np.where(ranked_indices == selected_idx)[0]
+                        if len(selected_positions) > 0:
+                            selected_rank = int(selected_positions[0]) + 1
+
+                    if gt_clip_normalized:
+                        # Find the index of ground truth video
+                        gt_idx = video_name_to_idx.get(gt_clip_normalized, -1)
+                        if gt_idx == -1:
+                            # Try with common variations
+                            for name, idx in video_name_to_idx.items():
+                                if gt_clip_normalized.lower() in name.lower() or name.lower() in gt_clip_normalized.lower():
+                                    gt_idx = idx
+                                    break
                         
-                        if gt_rank <= 3:
-                            top_3_hits += 1
-                        if gt_rank <= 5:
-                            top_5_hits += 1
-                    
-                    # Get ground truth similarity score
-                    gt_sim = seg_similarities[gt_idx]
-                    gt_similarities.append(gt_sim)
+                        if gt_idx >= 0:
+                            # Find rank of ground truth
+                            rank_positions = np.where(ranked_indices == gt_idx)[0]
+                            if len(rank_positions) > 0:
+                                gt_rank = int(rank_positions[0]) + 1  # 1-indexed
+                                reciprocal_rank = 1.0 / gt_rank
+                                
+                                if gt_rank <= 3:
+                                    top_3_hits += 1
+                                if gt_rank <= 5:
+                                    top_5_hits += 1
+                            
+                            # Get ground truth similarity score
+                            gt_sim = seg_similarities[gt_idx]
+                            gt_similarities.append(gt_sim)
             
             reciprocal_ranks.append(reciprocal_rank)
             predicted_similarities.append(selection.similarity_score)
@@ -223,7 +247,10 @@ class BenchmarkEvaluator:
                 is_exact_match=is_exact,
                 predicted_similarity=selection.similarity_score,
                 ground_truth_rank=gt_rank,
-                reciprocal_rank=reciprocal_rank
+                reciprocal_rank=reciprocal_rank,
+                final_query=final_query,
+                top_5_retrieved_clip_ids=top_5_ids,
+                selected_clip_rank=selected_rank
             )
             segment_results.append(asdict(seg_result))
             
@@ -235,7 +262,10 @@ class BenchmarkEvaluator:
                     'expected': gt_clip_normalized,
                     'predicted': predicted_clip,
                     'predicted_similarity': selection.similarity_score,
-                    'ground_truth_rank': gt_rank
+                    'ground_truth_rank': gt_rank,
+                    'selected_clip_rank': selected_rank,
+                    'top_5_retrieved_clip_ids': top_5_ids,
+                    'final_query': final_query
                 })
         
         # Calculate aggregate metrics
@@ -278,7 +308,8 @@ class BenchmarkEvaluator:
             segment_results=segment_results,
             exact_matches=exact_matches,
             mismatches=num_segments - exact_matches,
-            mismatch_details=mismatch_details
+            mismatch_details=mismatch_details,
+            assignment_metadata=assignment_metadata or {}
         )
         
         return results
@@ -343,6 +374,17 @@ class BenchmarkEvaluator:
             f"Allow Reuse: {results.allow_reuse}",
             f"Match-Only Mode: {results.match_only}",
             "",
+        ]
+        if results.assignment_metadata:
+            lines.extend([
+                "-" * 80,
+                "ASSIGNMENT METADATA",
+                "-" * 80,
+                "",
+                json.dumps(results.assignment_metadata, indent=2),
+                "",
+            ])
+        lines.extend([
             "-" * 80,
             "ACCURACY METRICS",
             "-" * 80,
@@ -360,7 +402,7 @@ class BenchmarkEvaluator:
             f"Avg Ground Truth Similarity:  {results.avg_ground_truth_similarity:.4f}",
             f"Similarity Correlation:       {results.similarity_correlation:.4f}",
             "",
-        ]
+        ])
         
         # Add comparison map
         lines.extend([

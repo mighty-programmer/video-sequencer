@@ -18,6 +18,8 @@ from dataclasses import dataclass, asdict
 import numpy as np
 from pathlib import Path
 
+from sequence_coherence import coherence_beam_search_assignment
+
 try:
     from videoprism import models as vp
 except ImportError:
@@ -628,6 +630,17 @@ def create_sequence_optimal(
         total_score = sum(s.similarity_score for s in sequence)
         logger.info(f"Optimal assignment total score: {total_score:.4f}")
     
+    semantic_total = float(sum(selection.similarity_score for selection in sequence))
+    video_matcher.last_assignment_diagnostics = {
+        "assignment_method": "hungarian",
+        "semantic_score": semantic_total,
+        "coherence_score": 0.0,
+        "combined_score": semantic_total,
+        "selected_clip_ids": [selection.video_id for selection in sequence],
+        "transition_diagnostics": [],
+        "params": {"allow_reuse": allow_reuse, "match_only": match_only},
+    }
+
     # Calculate start/end times in the final sequence
     current_time = 0.0
     for selection in sequence:
@@ -635,6 +648,122 @@ def create_sequence_optimal(
         selection.end_time = current_time + selection.trim_duration
         current_time = selection.end_time
     
+    return sequence
+
+
+def _selection_from_metadata(
+    segment_id: int,
+    segment: Dict,
+    metadata,
+    similarity: float,
+    video_matcher: VideoTextMatcher,
+    match_only: bool,
+    is_reused: bool = False,
+) -> ClipSelection:
+    window_start = getattr(metadata, 'window_start', 0.0)
+    if match_only:
+        trim_start = window_start
+        trim_end = window_start + metadata.duration
+    else:
+        trim_start, trim_end = video_matcher._calculate_trim_times(
+            metadata.duration, segment['duration'], window_start=window_start
+        )
+    return ClipSelection(
+        segment_id=segment_id,
+        video_id=metadata.video_id,
+        video_file_path=metadata.file_path,
+        start_time=0.0,
+        end_time=0.0,
+        duration=segment['duration'] if not match_only else metadata.duration,
+        trim_start=trim_start,
+        trim_end=trim_end,
+        trim_duration=trim_end - trim_start,
+        similarity_score=float(similarity),
+        motion_score=0.0,
+        context_score=0.0,
+        combined_score=float(similarity),
+        is_reused=is_reused,
+    )
+
+
+def create_sequence_coherence_beam(
+    script_segments: List[Dict],
+    video_matcher: VideoTextMatcher,
+    match_only: bool = True,
+    allow_reuse: bool = False,
+    top_k: int = 5,
+    beam_size: int = 10,
+    lambda_coherence: float = 0.1,
+    normalize_scores: bool = True,
+) -> List[ClipSelection]:
+    """Create a sequence using top-k beam search with neighboring clip coherence."""
+    all_metadata = video_matcher.get_all_video_metadata()
+    if not all_metadata:
+        logger.error("No video metadata available!")
+        return []
+    if not hasattr(video_matcher.video_indexer, 'get_all_embeddings'):
+        raise ValueError("coherence_beam assignment requires an indexer with get_all_embeddings(); use VideoPrism.")
+
+    logger.info("=" * 60)
+    logger.info("SEQUENCE COHERENCE BEAM SEARCH MODE")
+    logger.info("=" * 60)
+    logger.info(
+        "assignment_method=coherence_beam top_k=%s beam_size=%s lambda_coherence=%.4f normalize_scores=%s allow_reuse=%s",
+        top_k, beam_size, lambda_coherence, normalize_scores, allow_reuse,
+    )
+
+    similarity_matrix, all_metadata = video_matcher.compute_similarity_matrix(
+        script_segments,
+        match_only=match_only,
+    )
+    if similarity_matrix.size == 0:
+        return []
+
+    video_embeddings = video_matcher.video_indexer.get_all_embeddings()
+    clip_ids = [metadata.video_id for metadata in all_metadata]
+    selected_ids, diagnostics = coherence_beam_search_assignment(
+        similarity_matrix=similarity_matrix,
+        clip_ids=clip_ids,
+        video_embeddings=video_embeddings,
+        top_k=top_k,
+        beam_size=beam_size,
+        lambda_coherence=lambda_coherence,
+        allow_reuse=allow_reuse,
+        normalize_scores=normalize_scores,
+    )
+    video_matcher.last_assignment_diagnostics = diagnostics
+
+    if not selected_ids:
+        logger.error("Coherence beam search produced no selections")
+        return []
+
+    metadata_by_id = {metadata.video_id: metadata for metadata in all_metadata}
+    used_videos: Set[str] = set()
+    sequence: List[ClipSelection] = []
+    for seg_idx, video_id in enumerate(selected_ids):
+        metadata = metadata_by_id[video_id]
+        vid_idx = clip_ids.index(video_id)
+        is_reused = video_id in used_videos
+        used_videos.add(video_id)
+        sequence.append(_selection_from_metadata(
+            segment_id=seg_idx,
+            segment=script_segments[seg_idx],
+            metadata=metadata,
+            similarity=float(similarity_matrix[seg_idx, vid_idx]),
+            video_matcher=video_matcher,
+            match_only=match_only,
+            is_reused=is_reused,
+        ))
+
+    current_time = 0.0
+    for selection in sequence:
+        selection.start_time = current_time
+        selection.end_time = current_time + selection.trim_duration
+        current_time = selection.end_time
+
+    logger.info("Coherence beam final semantic score: %.4f", diagnostics.get('semantic_score', 0.0))
+    logger.info("Coherence beam final coherence score: %.4f", diagnostics.get('coherence_score', 0.0))
+    logger.info("Coherence beam final combined score: %.4f", diagnostics.get('combined_score', 0.0))
     return sequence
 
 
@@ -766,6 +895,17 @@ def create_sequence_greedy(
         sequence.append(selection)
         used_videos.add(selection.video_id)
     
+    semantic_total = float(sum(selection.similarity_score for selection in sequence))
+    video_matcher.last_assignment_diagnostics = {
+        "assignment_method": "greedy",
+        "semantic_score": semantic_total,
+        "coherence_score": 0.0,
+        "combined_score": semantic_total,
+        "selected_clip_ids": [selection.video_id for selection in sequence],
+        "transition_diagnostics": [],
+        "params": {"allow_reuse": allow_reuse, "match_only": match_only},
+    }
+
     # Calculate start/end times in the final sequence
     current_time = 0.0
     for selection in sequence:
@@ -781,7 +921,12 @@ def create_sequence(
     video_matcher: VideoTextMatcher,
     match_only: bool = False,
     allow_reuse: bool = True,
-    use_optimal: bool = True
+    use_optimal: bool = True,
+    assignment_method: str = 'hungarian',
+    top_k: int = 5,
+    beam_size: int = 10,
+    lambda_coherence: float = 0.1,
+    normalize_scores: bool = True,
 ) -> List[ClipSelection]:
     """
     Create a sequence of video clips matched to script segments.
@@ -796,6 +941,18 @@ def create_sequence(
     Returns:
         List of ClipSelection objects representing the video sequence
     """
+    method = (assignment_method or 'hungarian').lower()
+    if method in {'coherence_beam', 'sequence_coherence', 'beam_coherence'}:
+        return create_sequence_coherence_beam(
+            script_segments=script_segments,
+            video_matcher=video_matcher,
+            match_only=match_only,
+            allow_reuse=allow_reuse,
+            top_k=top_k,
+            beam_size=beam_size,
+            lambda_coherence=lambda_coherence,
+            normalize_scores=normalize_scores,
+        )
     if use_optimal:
         return create_sequence_optimal(
             script_segments, video_matcher, match_only, allow_reuse

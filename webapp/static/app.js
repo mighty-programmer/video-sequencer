@@ -54,10 +54,26 @@ function setStatus(id, message, isError = false) {
 }
 
 function csvList(value) {
-  return value
+  if (!value) return [];
+  return String(value)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function selectedValues(id) {
+  const element = $(id);
+  if (!element) return [];
+  if (element.tagName === "SELECT") {
+    const values = [...element.selectedOptions].map((option) => option.value).filter(Boolean);
+    return values.length ? values : [...element.options].filter((option) => option.defaultSelected).map((option) => option.value);
+  }
+  return csvList(element.value);
+}
+
+function firstSelectedValue(id, fallback = "") {
+  const values = selectedValues(id);
+  return values.length ? values[0] : fallback;
 }
 
 function asNumber(value, fallback) {
@@ -96,6 +112,13 @@ function syncBenchmarkSelects() {
       select.value = current;
     }
   });
+
+  const compareSelect = $("compareBenchmark");
+  if (compareSelect) {
+    const current = compareSelect.value || "all";
+    compareSelect.innerHTML = `<option value="all">All benchmarks</option>${benchmarkOptionsHtml(false)}`;
+    compareSelect.value = [...compareSelect.options].some((option) => option.value === current) ? current : "all";
+  }
 }
 
 function renderBenchmarks() {
@@ -173,22 +196,29 @@ function renderCache() {
   `).join("");
 }
 
+function isJobStoppable(job) {
+  return ["queued", "running", "stopping"].includes(job?.status);
+}
+
 function renderJobs() {
   const list = $("jobList");
   const log = $("jobLog");
+  const stopButton = $("stopSelectedJob");
   if (!list || !log) return;
 
   list.innerHTML = "";
   state.jobs.forEach((job) => {
     const node = document.createElement("div");
-    node.className = `job-item ${job.status}`;
+    node.className = `job-item ${job.status} ${job.job_id === state.selectedJobId ? "selected" : ""}`;
+    const canStop = isJobStoppable(job);
     node.innerHTML = `
       <div>
         <strong>${job.name}</strong>
-        <div class="muted">${job.status} · ${job.created_at}</div>
+        <div class="muted">${job.status} · PID ${job.pid || "pending"} · ${job.created_at}</div>
       </div>
       <div class="launch-actions">
         <button class="ghost" data-job-id="${job.job_id}">View Log</button>
+        ${canStop ? `<button class="ghost danger" data-stop-job="${job.job_id}">Stop Task</button>` : ""}
       </div>
     `;
     list.appendChild(node);
@@ -199,14 +229,22 @@ function renderJobs() {
       state.selectedJobId = button.dataset.jobId;
       const job = await api(`/api/jobs/${state.selectedJobId}`);
       log.textContent = job.log || "No log output yet.";
+      renderJobs();
     });
   });
 
-  if (state.selectedJobId) {
-    const selected = state.jobs.find((job) => job.job_id === state.selectedJobId);
-    if (selected) {
-      log.textContent = selected.log || "No log output yet.";
-    }
+  list.querySelectorAll("[data-stop-job]").forEach((button) => {
+    button.addEventListener("click", () => stopJob(button.dataset.stopJob));
+  });
+
+  const selected = state.jobs.find((job) => job.job_id === state.selectedJobId);
+  if (selected) {
+    log.textContent = selected.log || "No log output yet.";
+  } else if (state.selectedJobId) {
+    state.selectedJobId = null;
+  }
+  if (stopButton) {
+    stopButton.disabled = !selected || !isJobStoppable(selected);
   }
 }
 
@@ -282,13 +320,18 @@ function renderServerStatus() {
   const container = $("serverStatusCard");
   if (!container) return;
   const server = state.server || {};
+  const running = Boolean(server.running);
   container.innerHTML = `
-    <div><strong>Status:</strong> ${server.running ? "Running" : "Stopped"}</div>
+    <div><strong>Status:</strong> <span class="server-pill ${running ? "running" : "stopped"}">${running ? "Running" : "Stopped"}</span></div>
     <div><strong>PID:</strong> ${server.pid || "unknown"}</div>
     <div><strong>URL:</strong> ${server.url ? `<a href="${server.url}" target="_blank" rel="noreferrer">${server.url}</a>` : "n/a"}</div>
     <div><strong>Log File:</strong> ${server.log_file || "n/a"}</div>
     <div><strong>Restart Command:</strong> <code>${server.restart_command || "n/a"}</code></div>
   `;
+  const restartButton = $("restartServer");
+  const stopButton = $("stopServer");
+  if (restartButton) restartButton.disabled = false;
+  if (stopButton) stopButton.disabled = !running;
 }
 
 function setControlVisible(fieldId, inputId, visible) {
@@ -305,6 +348,12 @@ function updateSessionModeControls() {
   const usesOpenclip = mode === "openclip" || mode === "writeavideo";
   const usesVideoprism = mode === "videoprism";
   const usesKeywordIndex = mode === "writeavideo";
+  const usesCoherenceAssignment = mode === "videoprism";
+  const selectedAssignment = $("sessionAssignmentMethod")?.value || "hungarian";
+  const usesCoherenceBeam = usesCoherenceAssignment && selectedAssignment === "coherence_beam";
+  const selectedQueryMode = $("sessionQueryMode")?.value || "original";
+  const usesContextQuery = selectedQueryMode !== "original";
+  const usesLLMQuery = selectedQueryMode === "llm_expanded" || selectedQueryMode === "hybrid_llm";
   const selectedBenchmark = state.benchmarks.find((benchmark) => benchmark.number === $("sessionBenchmark")?.value);
   const hasManualSegments = Boolean($("sessionSegments")?.value.trim()) || Boolean(selectedBenchmark?.has_segments);
   const canSegmentAudio = !hasManualSegments;
@@ -318,6 +367,16 @@ function updateSessionModeControls() {
   // Candidate count still controls how many alternatives are shown for every mode.
   setControlVisible("sessionPoolField", "sessionPool", true);
   setControlVisible("sessionSimpleSegmentationField", "sessionSimpleSegmentation", canSegmentAudio);
+  setControlVisible("sessionAssignmentMethodField", "sessionAssignmentMethod", usesCoherenceAssignment);
+  setControlVisible("sessionCoherenceTopKField", "sessionCoherenceTopK", usesCoherenceBeam);
+  setControlVisible("sessionCoherenceBeamField", "sessionCoherenceBeam", usesCoherenceBeam);
+  setControlVisible("sessionLambdaField", "sessionLambda", usesCoherenceBeam);
+  setControlVisible("sessionNormalizeScoresField", "sessionNormalizeScores", usesCoherenceBeam);
+  setControlVisible("sessionQueryModeField", "sessionQueryMode", usesVideoprism);
+  setControlVisible("sessionContextWindowField", "sessionContextWindow", usesVideoprism && usesContextQuery);
+  setControlVisible("sessionQueryLLMField", "sessionQueryLLM", usesVideoprism && usesLLMQuery);
+  setControlVisible("sessionUseQueryCacheField", "sessionUseQueryCache", usesVideoprism && usesLLMQuery);
+  setControlVisible("sessionForceRefreshExpansionsField", "sessionForceRefreshExpansions", usesVideoprism && usesLLMQuery);
 }
 
 function renderSessions() {
@@ -364,6 +423,29 @@ function renderSessions() {
   });
 }
 
+function renderSequenceDiagnostics(session) {
+  const target = $("sequenceDiagnostics");
+  if (!target) return;
+  const diagnostics = session?.config?.assignment_diagnostics || {};
+  if (!diagnostics.assignment_method) {
+    target.textContent = "Assignment diagnostics will appear after global matching.";
+    return;
+  }
+  const transitions = diagnostics.transition_diagnostics || [];
+  const query = diagnostics.query_generation || session?.config?.query_generation || {};
+  const queryPreview = (query.final_queries || []).slice(0, 3).map((item) => `
+    <div><strong>${Number(item.index) + 1}.</strong> ${shortText(item.final_query || item.original || "", 140)}</div>
+  `).join("");
+  const transitionText = transitions.slice(0, 6).map((item) => `${item.from_clip} -> ${item.to_clip}: ${Number(item.transition_coherence || 0).toFixed(3)}`).join(" · ");
+  target.innerHTML = `
+    <strong>Assignment:</strong> ${diagnostics.assignment_method}
+    <span>Semantic ${Number(diagnostics.semantic_score || 0).toFixed(3)} · Coherence ${Number(diagnostics.coherence_score || 0).toFixed(3)} · Combined ${Number(diagnostics.combined_score || 0).toFixed(3)}</span>
+    <div><strong>Query mode:</strong> ${query.query_mode || "original"} · cache ${query.cache_used ? "used" : "not used"}${query.cache_path ? ` · ${shortText(query.cache_path, 90)}` : ""}</div>
+    ${queryPreview ? `<details><summary>Preview Generated Queries</summary>${queryPreview}</details>` : ""}
+    ${transitionText ? `<div>${transitionText}${transitions.length > 6 ? " · ..." : ""}</div>` : ""}
+  `;
+}
+
 function segmentAccent(index) {
   const accents = ["var(--green)", "var(--blue)", "var(--yellow)", "var(--orange)", "var(--pink)"];
   return accents[index % accents.length];
@@ -381,6 +463,7 @@ function renderEditor() {
   workspace.classList.remove("hidden");
   const session = state.currentSession;
   renderBestGridConfig(session.config?.best_grid_search || state.bestGridSearch);
+  renderSequenceDiagnostics(session);
   const segments = session.segments || [];
   if (state.activeSegmentId == null && segments.length) {
     state.activeSegmentId = segments[0].segment_id;
@@ -584,6 +667,16 @@ async function createSession() {
       enable_object_detection: $("sessionMode").value === "writeavideo" && $("sessionObjects").checked,
       enable_face_detection: $("sessionMode").value === "writeavideo" && $("sessionFaces").checked,
       exact_matching_mode: $("sessionExactMatching")?.checked || false,
+      assignment_method: $("sessionMode").value === "videoprism" ? $("sessionAssignmentMethod").value : "hungarian",
+      coherence_top_k: asNumber($("sessionCoherenceTopK")?.value, 5),
+      coherence_beam_size: asNumber($("sessionCoherenceBeam")?.value, 10),
+      lambda_coherence: asNumber($("sessionLambda")?.value, 0.1),
+      normalize_coherence_scores: $("sessionNormalizeScores")?.checked ?? true,
+      query_mode: $("sessionMode").value === "videoprism" ? ($("sessionQueryMode")?.value || "original") : "original",
+      context_window_size: asNumber($("sessionContextWindow")?.value, 1),
+      query_llm_model: $("sessionQueryLLM")?.value.trim() || null,
+      use_query_cache: $("sessionUseQueryCache")?.checked ?? true,
+      force_refresh_expansions: $("sessionForceRefreshExpansions")?.checked || false,
       use_best_grid_search: true,
     };
     const session = await api("/api/editor/sessions", {
@@ -721,7 +814,57 @@ async function clearCache(action) {
   }
 }
 
+
+function setPipelineVisible(key, visible) {
+  document.querySelectorAll(`[data-pipeline-show="${key}"]`).forEach((element) => {
+    element.classList.toggle("hidden", !visible);
+  });
+}
+
+function setSelectEnabled(id, enabled) {
+  const element = $(id);
+  if (element) element.disabled = !enabled;
+}
+
+function updatePipelineControls() {
+  setPipelineVisible("quick-openclip", $("quickEncoder")?.value === "openclip");
+  setPipelineVisible("full-custom-paths", !$("fullBenchmark")?.value);
+
+  const vpAssignments = selectedValues("videoprismGridAssignments");
+  const vpQueryModes = selectedValues("videoprismGridQueryModes");
+  const usesCoherence = vpAssignments.includes("coherence_beam");
+  const usesContext = vpQueryModes.some((mode) => ["context_window", "hybrid_llm"].includes(mode));
+  const usesLlmQuery = vpQueryModes.some((mode) => ["llm_expanded", "hybrid_llm"].includes(mode));
+
+  setPipelineVisible("videoprism-coherence", usesCoherence);
+  setPipelineVisible("videoprism-context", usesContext);
+  setPipelineVisible("videoprism-llm-query", usesLlmQuery);
+  ["videoprismGridTopK", "videoprismGridBeams", "videoprismGridLambdas", "videoprismGridNormalizeCoherence"].forEach((id) => setSelectEnabled(id, usesCoherence));
+  setSelectEnabled("videoprismGridContextWindows", usesContext);
+  setSelectEnabled("videoprismGridQueryLLM", usesLlmQuery);
+  setSelectEnabled("videoprismGridUseQueryCache", usesLlmQuery);
+}
+
+function bindPipelineControls() {
+  [
+    "quickEncoder",
+    "fullBenchmark",
+    "videoprismGridAssignments",
+    "videoprismGridQueryModes",
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.addEventListener("change", updatePipelineControls);
+  });
+}
+
 async function submitJob(action) {
+  updatePipelineControls();
+  const vpAssignments = selectedValues("videoprismGridAssignments");
+  const vpQueryModes = selectedValues("videoprismGridQueryModes");
+  const usesVpCoherence = vpAssignments.includes("coherence_beam");
+  const usesVpContext = vpQueryModes.some((mode) => ["context_window", "hybrid_llm"].includes(mode));
+  const usesVpLlmQuery = vpQueryModes.some((mode) => ["llm_expanded", "hybrid_llm"].includes(mode));
+
   const payloadByAction = {
     "quick-benchmark": {
       benchmark: $("quickBenchmark").value,
@@ -741,48 +884,115 @@ async function submitJob(action) {
     },
     "openclip-grid-search": {
       benchmark: $("openclipGridBenchmark").value,
-      prompt_modes: csvList($("openclipGridPrompts").value),
-      frames: csvList($("openclipGridFrames").value),
-      aggregations: csvList($("openclipGridAggregations").value),
+      models: selectedValues("openclipGridModels"),
+      prompt_modes: selectedValues("openclipGridPrompts"),
+      frames: selectedValues("openclipGridFrames"),
+      aggregations: selectedValues("openclipGridAggregations"),
+      no_windowing: $("openclipGridNoWindowing").checked,
     },
     "videoprism-grid-search": {
       benchmark: $("videoprismGridBenchmark").value,
-      prompt_modes: csvList($("videoprismGridPrompts").value),
-      frames: csvList($("videoprismGridFrames").value),
+      models: selectedValues("videoprismGridModels"),
+      prompt_modes: selectedValues("videoprismGridPrompts"),
+      frames: selectedValues("videoprismGridFrames"),
+      resolutions: selectedValues("videoprismGridResolutions"),
+      dual_softmax: selectedValues("videoprismGridDualSM"),
+      assignment_methods: vpAssignments,
+      coherence_top_k: usesVpCoherence ? selectedValues("videoprismGridTopK") : [],
+      coherence_beam_sizes: usesVpCoherence ? selectedValues("videoprismGridBeams") : [],
+      lambda_coherence_values: usesVpCoherence ? selectedValues("videoprismGridLambdas") : [],
+      disable_normalize_coherence_scores: usesVpCoherence ? !$("videoprismGridNormalizeCoherence").checked : false,
+      query_modes: vpQueryModes,
+      context_window_sizes: usesVpContext ? selectedValues("videoprismGridContextWindows") : [],
+      query_llm_model: usesVpLlmQuery ? ($("videoprismGridQueryLLM")?.value.trim() || null) : null,
+      use_query_cache: usesVpLlmQuery ? $("videoprismGridUseQueryCache").checked : true,
+      no_windowing: $("videoprismGridNoWindowing").checked,
     },
     "write-a-video-grid-search": {
       benchmark: $("wavGridBenchmark").value,
-      pool_sizes: csvList($("wavGridPools").value),
-      keyword_weights: csvList($("wavGridKeywordWeights").value),
-      prompt_modes: csvList($("wavGridPrompts").value),
+      models: selectedValues("wavGridModels"),
+      frames: selectedValues("wavGridFrames"),
+      aggregations: selectedValues("wavGridAggregations"),
+      pool_sizes: selectedValues("wavGridPools"),
+      keyword_weights: selectedValues("wavGridKeywordWeights"),
+      prompt_modes: selectedValues("wavGridPrompts"),
+      disable_object_detection: !$("wavGridObjectDetection").checked,
+      disable_face_detection: !$("wavGridFaceDetection").checked,
+      no_windowing: $("wavGridNoWindowing").checked,
     },
     "compare-all-models": {
       benchmark: $("compareBenchmark").value.trim(),
       llm_model: $("compareLLM").value.trim(),
+      no_windowing: $("compareNoWindowing").checked,
     },
   };
 
+  const payload = payloadByAction[action];
+  if (!payload) return;
+  if (Object.prototype.hasOwnProperty.call(payload, "benchmark") && !payload.benchmark) {
+    setStatus("pipelineStatus", "Choose a benchmark before launching this job.", true);
+    return;
+  }
+
   try {
+    setStatus("pipelineStatus", "Starting job...");
     const job = await api(`/api/jobs/run/${action}`, {
       method: "POST",
-      body: JSON.stringify({ payload: payloadByAction[action] }),
+      body: JSON.stringify({ payload }),
     });
     state.selectedJobId = job.job_id;
+    setStatus("pipelineStatus", `${job.name || "Job"} started. Opening Operations logs...`);
     await refreshJobsOnly();
     switchTab("operations");
   } catch (error) {
-    setStatus("settingsStatus", error.message, true);
+    setStatus("pipelineStatus", error.message, true);
   }
 }
 
 async function refreshJobsOnly() {
-  state.jobs = await api("/api/jobs");
-  renderJobs();
+  try {
+    state.jobs = await api("/api/jobs");
+    renderJobs();
+    setStatus("jobStatusMessage", "");
+  } catch (error) {
+    setStatus("jobStatusMessage", error.message, true);
+  }
+}
+
+async function stopJob(jobId = state.selectedJobId) {
+  if (!jobId) {
+    setStatus("jobStatusMessage", "Select a running job first.", true);
+    return;
+  }
+  const stopButton = $("stopSelectedJob");
+  if (stopButton) stopButton.disabled = true;
+  try {
+    setStatus("jobStatusMessage", "Stopping selected job...");
+    const job = await api(`/api/jobs/${jobId}/stop`, {
+      method: "POST",
+      body: JSON.stringify({ payload: {} }),
+    });
+    state.selectedJobId = job.job_id;
+    await refreshJobsOnly();
+    const selected = state.jobs.find((item) => item.job_id === job.job_id) || job;
+    $("jobLog").textContent = selected.log || job.log || "Job stopped.";
+    setStatus("jobStatusMessage", `Job ${job.job_id.slice(0, 8)} stopped.`);
+  } catch (error) {
+    setStatus("jobStatusMessage", error.message, true);
+  } finally {
+    renderJobs();
+  }
 }
 
 async function refreshServerStatusOnly() {
-  state.server = await api("/api/server");
-  renderServerStatus();
+  setStatus("serverStatusMessage", "Refreshing server status...");
+  try {
+    state.server = await api("/api/server");
+    renderServerStatus();
+    setStatus("serverStatusMessage", state.server.running ? "Server is running." : "Server is stopped.", !state.server.running);
+  } catch (error) {
+    setStatus("serverStatusMessage", error.message, true);
+  }
 }
 
 async function waitForServerReturn(timeoutMs = 30000, intervalMs = 2000) {
@@ -799,33 +1009,46 @@ async function waitForServerReturn(timeoutMs = 30000, intervalMs = 2000) {
 }
 
 async function restartServer() {
+  const restartButton = $("restartServer");
+  const stopButton = $("stopServer");
+  const refreshButton = $("refreshServerStatus");
+  [restartButton, stopButton, refreshButton].forEach((button) => { if (button) button.disabled = true; });
   try {
     const result = await api("/api/server/restart", {
       method: "POST",
       body: JSON.stringify({ payload: {} }),
     });
     setStatus("serverStatusMessage", result.message || "Server restart scheduled.");
-    const recovered = await waitForServerReturn();
+    const recovered = await waitForServerReturn(60000, 2000);
     if (recovered) {
+      await refreshServerStatusOnly();
       setStatus("serverStatusMessage", "Server restarted and UI reconnected.");
     } else {
       setStatus("serverStatusMessage", "Restart requested. Refresh this page in a few seconds if the UI does not reconnect automatically.", true);
     }
   } catch (error) {
     setStatus("serverStatusMessage", error.message, true);
+  } finally {
+    [restartButton, refreshButton].forEach((button) => { if (button) button.disabled = false; });
+    renderServerStatus();
   }
 }
 
 async function stopServer() {
+  const restartCommand = state.server?.restart_command || "cd /data/giannis_pantrakis/video-sequencer && /home/giannis_pantrakis/miniconda3/bin/python src/webapp.py";
+  const restartButton = $("restartServer");
+  const stopButton = $("stopServer");
+  if (restartButton) restartButton.disabled = true;
+  if (stopButton) stopButton.disabled = true;
   try {
     const result = await api("/api/server/stop", {
       method: "POST",
       body: JSON.stringify({ payload: {} }),
     });
-    const restartCommand = state.server?.restart_command || "n/a";
-    setStatus("serverStatusMessage", `${result.message || "Server stop scheduled."} Restart later with: ${restartCommand}`);
+    setStatus("serverStatusMessage", `${result.message || "Server stop scheduled."} Restart later over SSH with: ${restartCommand}`);
   } catch (error) {
     setStatus("serverStatusMessage", error.message, true);
+    renderServerStatus();
   }
 }
 
@@ -859,6 +1082,8 @@ function bindEvents() {
     refreshBestGridConfig();
   });
   $("sessionSegments").addEventListener("input", updateSessionModeControls);
+  $("sessionAssignmentMethod").addEventListener("change", updateSessionModeControls);
+  $("sessionQueryMode").addEventListener("change", updateSessionModeControls);
   $("createSession").addEventListener("click", createSession);
   $("refreshSessions").addEventListener("click", refreshBootstrap);
   $("saveSegment").addEventListener("click", saveSegmentSettings);
@@ -874,6 +1099,8 @@ function bindEvents() {
   $("uploadBenchmarkButton").addEventListener("click", uploadBenchmark);
   $("saveSettings").addEventListener("click", saveSettings);
   $("refreshServerStatus").addEventListener("click", refreshServerStatusOnly);
+  $("refreshJobs")?.addEventListener("click", refreshJobsOnly);
+  $("stopSelectedJob")?.addEventListener("click", () => stopJob());
   $("restartServer").addEventListener("click", restartServer);
   $("stopServer").addEventListener("click", stopServer);
 
@@ -891,6 +1118,8 @@ function bindEvents() {
     });
   });
 
+  bindPipelineControls();
+
   document.querySelectorAll("[data-job-action]").forEach((button) => {
     button.addEventListener("click", () => submitJob(button.dataset.jobAction));
   });
@@ -903,8 +1132,10 @@ function bindEvents() {
 async function initialize() {
   bindEvents();
   updateSessionModeControls();
+  updatePipelineControls();
   await refreshBootstrap();
   updateSessionModeControls();
+  updatePipelineControls();
   await refreshBestGridConfig();
   renderEditor();
   setInterval(refreshJobsOnly, 4000);

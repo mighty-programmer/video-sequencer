@@ -53,6 +53,7 @@ from matching import (
 )
 from benchmark import BenchmarkEvaluator, BenchmarkResults
 from prompt_generator import create_ensemble_templates
+from query_expansion import build_query_expansions, config_from_values
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
@@ -86,6 +87,17 @@ class VideoPrismGridSearchConfig:
     prompt_mode: str  # 'none', 'template:*', 'ensemble:template', 'ensemble:llm'
     resolution: int
     use_dual_softmax: bool
+    assignment_method: str = 'hungarian'
+    top_k: int = 5
+    beam_size: int = 10
+    lambda_coherence: float = 0.1
+    normalize_scores: bool = True
+    query_mode: str = 'original'
+    context_window_size: int = 1
+    query_llm_model: Optional[str] = None
+    use_query_cache: bool = True
+    force_refresh_expansions: bool = False
+    disable_llm_expansion: bool = False
     prompt_template: Optional[str] = None
     ensemble_prompts: Optional[List[str]] = None
 
@@ -193,6 +205,17 @@ class VideoPrismGridSearch:
         prompt_modes: List[str] = None,
         resolutions_list: List[int] = None,
         use_dual_softmax_list: List[bool] = None,
+        assignment_methods: List[str] = None,
+        coherence_top_k_list: List[int] = None,
+        coherence_beam_size_list: List[int] = None,
+        lambda_coherence_list: List[float] = None,
+        normalize_scores: bool = True,
+        query_modes: List[str] = None,
+        context_window_sizes: List[int] = None,
+        query_llm_model: str = None,
+        use_query_cache: bool = True,
+        force_refresh_expansions: bool = False,
+        disable_llm_expansion: bool = False,
         llm_model: str = None
     ) -> List[VideoPrismGridSearchConfig]:
         """
@@ -221,35 +244,63 @@ class VideoPrismGridSearch:
                           'ensemble:template']
             if llm_model:
                 prompt_modes.append('ensemble:llm')
+        if assignment_methods is None:
+            assignment_methods = ['hungarian']
+        if coherence_top_k_list is None:
+            coherence_top_k_list = [5]
+        if coherence_beam_size_list is None:
+            coherence_beam_size_list = [10]
+        if lambda_coherence_list is None:
+            lambda_coherence_list = [0.1]
+        if query_modes is None:
+            query_modes = ['original']
+        if context_window_sizes is None:
+            context_window_sizes = [1]
         
         configs = []
-        for model, num_frames, resolution, use_dual_softmax, prompt_mode in itertools.product(
-            models, num_frames_list, resolutions_list, use_dual_softmax_list, prompt_modes
-        ):
-            config = VideoPrismGridSearchConfig(
-                model_name=model,
-                num_frames=num_frames,
-                resolution=resolution,
-                use_dual_softmax=use_dual_softmax,
-                prompt_mode=prompt_mode
-            )
+        base_product = itertools.product(
+            models, num_frames_list, resolutions_list, use_dual_softmax_list, prompt_modes, assignment_methods, query_modes, context_window_sizes
+        )
+        for model, num_frames, resolution, use_dual_softmax, prompt_mode, assignment_method, query_mode, context_window_size in base_product:
+            beam_param_product = [(5, 10, 0.0)]
+            if assignment_method == 'coherence_beam':
+                beam_param_product = itertools.product(coherence_top_k_list, coherence_beam_size_list, lambda_coherence_list)
+            for top_k, beam_size, lambda_coherence in beam_param_product:
+                config = VideoPrismGridSearchConfig(
+                    model_name=model,
+                    num_frames=num_frames,
+                    resolution=resolution,
+                    use_dual_softmax=use_dual_softmax,
+                    prompt_mode=prompt_mode,
+                    assignment_method=assignment_method,
+                    top_k=int(top_k),
+                    beam_size=int(beam_size),
+                    lambda_coherence=float(lambda_coherence),
+                    normalize_scores=normalize_scores,
+                    query_mode=query_mode,
+                    context_window_size=int(context_window_size),
+                    query_llm_model=query_llm_model or llm_model,
+                    use_query_cache=use_query_cache,
+                    force_refresh_expansions=force_refresh_expansions,
+                    disable_llm_expansion=disable_llm_expansion,
+                )
             
-            # Set prompt template or ensemble prompts based on mode
-            if prompt_mode.startswith('template:'):
-                template_name = prompt_mode.split(':', 1)[1]
-                template = VIDEOPRISM_PROMPT_TEMPLATES.get(template_name)
-                if template is None:
-                    logger.warning(f"Unknown template: {template_name}, skipping")
-                    continue
-                config.prompt_template = template
-            elif prompt_mode == 'ensemble:template':
-                config.ensemble_prompts = DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
-            elif prompt_mode == 'ensemble:llm':
-                # Will be populated during run with pre-generated LLM prompts
-                config.prompt_template = None
-                config.ensemble_prompts = None
-            
-            configs.append(config)
+                # Set prompt template or ensemble prompts based on mode
+                if prompt_mode.startswith('template:'):
+                    template_name = prompt_mode.split(':', 1)[1]
+                    template = VIDEOPRISM_PROMPT_TEMPLATES.get(template_name)
+                    if template is None:
+                        logger.warning(f"Unknown template: {template_name}, skipping")
+                        continue
+                    config.prompt_template = template
+                elif prompt_mode == 'ensemble:template':
+                    config.ensemble_prompts = DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
+                elif prompt_mode == 'ensemble:llm':
+                    # Will be populated during run with pre-generated LLM prompts
+                    config.prompt_template = None
+                    config.ensemble_prompts = None
+                
+                configs.append(config)
         
         logger.info(f"Generated {len(configs)} configurations to test")
         return configs
@@ -308,7 +359,8 @@ class VideoPrismGridSearch:
         # Short model name for display
         model_short = 'base' if 'base' in config.model_name else 'large'
         config_desc = (
-            f"VP-{model_short} | {config.num_frames}f | {config.resolution}p | DualSM:{config.use_dual_softmax} | {config.prompt_mode}"
+            f"VP-{model_short} | {config.num_frames}f | {config.resolution}p | DualSM:{config.use_dual_softmax} | "
+            f"{config.prompt_mode} | query:{config.query_mode}/w{config.context_window_size} | assign:{config.assignment_method} | k:{config.top_k} | beam:{config.beam_size} | λ:{config.lambda_coherence}"
         )
         logger.info(f"\n{'='*60}")
         logger.info(f"Testing: {config_desc}")
@@ -390,12 +442,44 @@ class VideoPrismGridSearch:
                     min_similarity_threshold=0.0
                 )
             
+            query_config = config_from_values(
+                query_mode=config.query_mode,
+                context_window_size=config.context_window_size,
+                llm_model=config.query_llm_model,
+                use_query_cache=config.use_query_cache,
+                force_refresh_expansions=config.force_refresh_expansions,
+                disable_llm_calls=config.disable_llm_expansion,
+            )
+            query_segments, query_metadata = build_query_expansions(
+                self.segments,
+                config=query_config,
+                cache_root=self.cache_base_dir,
+            )
+
             # 3. Run matching
             t_match_start = time.time()
             clip_selections = create_sequence(
-                self.segments, matcher,
-                match_only=True, allow_reuse=False, use_optimal=True
+                query_segments, matcher,
+                match_only=True,
+                allow_reuse=False,
+                use_optimal=True,
+                assignment_method=config.assignment_method,
+                top_k=config.top_k,
+                beam_size=config.beam_size,
+                lambda_coherence=config.lambda_coherence,
+                normalize_scores=config.normalize_scores,
             )
+            assignment_metadata = getattr(matcher, 'last_assignment_diagnostics', None) or {
+                'assignment_method': config.assignment_method,
+                'params': {
+                    'top_k': config.top_k,
+                    'beam_size': config.beam_size,
+                    'lambda_coherence': config.lambda_coherence,
+                    'normalize_scores': config.normalize_scores,
+                    'allow_reuse': False,
+                },
+            }
+            assignment_metadata['query_generation'] = query_metadata
             matching_time = time.time() - t_match_start
             
             if not clip_selections:
@@ -404,7 +488,7 @@ class VideoPrismGridSearch:
             
             # 4. Compute similarity matrix for evaluation
             similarity_matrix, all_metadata = matcher.compute_similarity_matrix(
-                self.segments, 
+                query_segments, 
                 match_only=True,
                 use_dual_softmax=config.use_dual_softmax
             )
@@ -412,12 +496,13 @@ class VideoPrismGridSearch:
             # 5. Evaluate against ground truth
             benchmark_results = self.evaluator.evaluate(
                 clip_selections=clip_selections,
-                segment_dicts=self.segments,
+                segment_dicts=query_segments,
                 similarity_matrix=similarity_matrix,
                 all_metadata=all_metadata,
-                matching_mode='optimal',
+                matching_mode=config.assignment_method,
                 allow_reuse=False,
-                match_only=True
+                match_only=True,
+                assignment_metadata=assignment_metadata,
             )
             
             total_time = time.time() - t_start
@@ -455,6 +540,17 @@ class VideoPrismGridSearch:
         prompt_modes: List[str] = None,
         resolutions_list: List[int] = None,
         use_dual_softmax_list: List[bool] = None,
+        assignment_methods: List[str] = None,
+        coherence_top_k_list: List[int] = None,
+        coherence_beam_size_list: List[int] = None,
+        lambda_coherence_list: List[float] = None,
+        normalize_scores: bool = True,
+        query_modes: List[str] = None,
+        context_window_sizes: List[int] = None,
+        query_llm_model: str = None,
+        use_query_cache: bool = True,
+        force_refresh_expansions: bool = False,
+        disable_llm_expansion: bool = False,
         llm_model: str = None,
         quick: bool = False,
         reset_llm_cache: bool = False
@@ -494,6 +590,17 @@ class VideoPrismGridSearch:
             prompt_modes=prompt_modes,
             resolutions_list=resolutions_list,
             use_dual_softmax_list=use_dual_softmax_list,
+            assignment_methods=assignment_methods,
+            coherence_top_k_list=coherence_top_k_list,
+            coherence_beam_size_list=coherence_beam_size_list,
+            lambda_coherence_list=lambda_coherence_list,
+            normalize_scores=normalize_scores,
+            query_modes=query_modes,
+            context_window_sizes=context_window_sizes,
+            query_llm_model=query_llm_model or llm_model,
+            use_query_cache=use_query_cache,
+            force_refresh_expansions=force_refresh_expansions,
+            disable_llm_expansion=disable_llm_expansion,
             llm_model=llm_model
         )
         
@@ -566,6 +673,13 @@ class VideoPrismGridSearch:
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write(summary_text)
         
+        if any(r.get('config', {}).get('assignment_method') == 'coherence_beam' for r in results_data['results']):
+            benchmark_token = Path(self.video_dir).name.replace('video_', 'benchmark_')
+            coherence_path = self.output_dir / f'{benchmark_token}_videoprism_coherence_beam_results.json'
+            with open(coherence_path, 'w') as f:
+                json.dump(results_data, f, indent=2)
+            logger.info(f"Saved coherence beam comparison results to {coherence_path}")
+
         logger.info(f"Saved grid search results to {output_path} and {txt_path}")
 
     def _print_summary(self, elapsed: float):
@@ -586,7 +700,7 @@ class VideoPrismGridSearch:
         lines.append("╠" + "═" * 90 + "╣")
         
         # Header
-        lines.append("║  RANK │ MODEL   │ FRAMES │ RES  │ DUALSM │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
+        lines.append("║  RANK │ MODEL   │ FRAMES │ RES  │ DUALSM │ ASSIGNMENT       │ PROMPT MODE        │ EXACT% │ TOP3%  │ TOP5%  │ MRR    ║")
         lines.append("╟" + "─" * 99 + "╢")
         
         # Results
@@ -596,11 +710,12 @@ class VideoPrismGridSearch:
             frames = str(cfg['num_frames'])
             res = str(cfg['resolution'])
             dualsm = "Yes" if cfg['use_dual_softmax'] else "No"
-            prompt = cfg['prompt_mode'][:18]
+            prompt = f"{cfg['prompt_mode']}|{cfg.get('query_mode', 'original')}"[:18]
+            assignment = cfg.get('assignment_method', 'hungarian')[:16]
             
             marker = " ★" if i == 0 else "  "
             
-            lines.append(f"║{marker}{i+1:3d}  │ {model:<7} │ {frames:>6} │ {res:>4} │ {dualsm:<6} │ {prompt:<18} │ "
+            lines.append(f"║{marker}{i+1:3d}  │ {model:<7} │ {frames:>6} │ {res:>4} │ {dualsm:<6} │ {assignment:<16} │ {prompt:<18} │ "
                   f"{result.exact_match_accuracy:5.1f}% │ {result.top_3_accuracy:5.1f}% │ "
                   f"{result.top_5_accuracy:5.1f}% │ {result.mrr:.4f} ║")
         
@@ -622,6 +737,8 @@ class VideoPrismGridSearch:
             lines.append(f"║  Resolution:   {cfg['resolution']:<81} ║")
             lines.append(f"║  Dual Softmax: {cfg['use_dual_softmax']:<81} ║")
             lines.append(f"║  Prompt Mode:  {cfg['prompt_mode']:<81} ║")
+            lines.append(f"║  Query Mode:   {cfg.get('query_mode', 'original'):<81} ║")
+            lines.append(f"║  Context Win:  {cfg.get('context_window_size', 1):<81} ║")
             lines.append("╟" + "─" * 99 + "╢")
             lines.append(f"║  Exact Match: {best.exact_match_accuracy:.1f}%   │   "
                   f"Top-3: {best.top_3_accuracy:.1f}%   │   "
@@ -633,6 +750,21 @@ class VideoPrismGridSearch:
             lines.append("║  Run with best config:" + " " * 76 + "║")
             
             cmd = f"python src/main.py --encoder videoprism --videoprism-model {cfg['model_name']}"
+            cmd += f" --videoprism-frames {cfg['num_frames']} --videoprism-resolution {cfg['resolution']}"
+            if cfg.get('use_dual_softmax'):
+                cmd += " --use-dual-softmax"
+            if cfg.get('query_mode', 'original') != 'original':
+                cmd += f" --query-mode {cfg.get('query_mode')} --context-window-size {cfg.get('context_window_size', 1)}"
+                if cfg.get('query_llm_model'):
+                    cmd += f" --query-llm-model {cfg.get('query_llm_model')}"
+            assignment_method = cfg.get('assignment_method', 'hungarian')
+            if assignment_method != 'hungarian':
+                cmd += f" --assignment-method {assignment_method}"
+                cmd += f" --coherence-top-k {cfg.get('top_k', 5)}"
+                cmd += f" --coherence-beam-size {cfg.get('beam_size', 10)}"
+                cmd += f" --lambda-coherence {cfg.get('lambda_coherence', 0.1)}"
+                if not cfg.get('normalize_scores', True):
+                    cmd += " --no-normalize-coherence-scores"
             # Wrap long command
             if len(cmd) > 95:
                 lines.append(f"║    {cmd[:95]} ║")
@@ -738,6 +870,30 @@ Examples:
                        help='Whether to use dual softmax matching (e.g., true false)')
     parser.add_argument('--prompt-modes', nargs='+', default=None,
                        help='Prompt modes to test (e.g., none template:video ensemble:template ensemble:llm)')
+    parser.add_argument('--assignment-methods', nargs='+', default=None,
+                       choices=['hungarian', 'coherence_beam'],
+                       help='Assignment methods to test. Defaults to hungarian only.')
+    parser.add_argument('--coherence-top-k', nargs='+', type=int, default=None,
+                       help='Top-K candidate counts for coherence beam search')
+    parser.add_argument('--coherence-beam-sizes', nargs='+', type=int, default=None,
+                       help='Beam sizes for coherence beam search')
+    parser.add_argument('--lambda-coherence-values', nargs='+', type=float, default=None,
+                       help='Lambda coherence weights for coherence beam search')
+    parser.add_argument('--no-normalize-coherence-scores', action='store_false', dest='normalize_coherence_scores', default=True,
+                       help='Disable score normalization for coherence beam search')
+    parser.add_argument('--query-modes', nargs='+', default=None,
+                       choices=['original', 'context_window', 'llm_expanded', 'hybrid_llm'],
+                       help='Retrieval query generation modes to test. Defaults to original only.')
+    parser.add_argument('--context-window-sizes', nargs='+', type=int, default=None,
+                       help='Context window sizes for query generation, e.g. 1 2')
+    parser.add_argument('--query-llm-model', default=None,
+                       help='LLM model for llm_expanded/hybrid_llm query generation')
+    parser.add_argument('--no-query-cache', action='store_false', dest='use_query_cache', default=True,
+                       help='Disable cached query expansions')
+    parser.add_argument('--force-refresh-expansions', action='store_true',
+                       help='Regenerate query expansions even if cache exists')
+    parser.add_argument('--disable-llm-expansion', action='store_true',
+                       help='Do not call an LLM for query expansion; requires existing cache for LLM modes')
     
     # LLM ensemble
     parser.add_argument('--llm-model', default=None,
@@ -803,6 +959,17 @@ Examples:
         resolutions_list=args.resolutions,
         use_dual_softmax_list=args.dual_softmax,
         prompt_modes=args.prompt_modes,
+        assignment_methods=args.assignment_methods,
+        coherence_top_k_list=args.coherence_top_k,
+        coherence_beam_size_list=args.coherence_beam_sizes,
+        lambda_coherence_list=args.lambda_coherence_values,
+        normalize_scores=args.normalize_coherence_scores,
+        query_modes=args.query_modes,
+        context_window_sizes=args.context_window_sizes,
+        query_llm_model=args.query_llm_model,
+        use_query_cache=args.use_query_cache,
+        force_refresh_expansions=args.force_refresh_expansions,
+        disable_llm_expansion=args.disable_llm_expansion,
         llm_model=args.llm_model,
         quick=args.quick,
         reset_llm_cache=args.reset_llm_cache

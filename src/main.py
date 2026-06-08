@@ -24,6 +24,7 @@ from typing import Optional, List, Dict
 # Matching module (no JAX dependency)
 from matching import VideoTextMatcher, LLMEnsembleVideoTextMatcher, create_sequence, ClipSelection
 from prompt_generator import create_ensemble_templates
+from query_expansion import build_query_expansions, config_from_values, metadata_summary
 
 # VideoPrism-dependent imports (require JAX)
 try:
@@ -192,7 +193,19 @@ class VideoSequencingPipeline:
         window_size: float = 5.0,
         window_overlap: float = 0.5,
         encoder: str = 'videoprism',
-        openclip_model: str = 'ViT-B-32'
+        openclip_model: str = 'ViT-B-32',
+        assignment_method: str = 'hungarian',
+        coherence_top_k: int = 5,
+        coherence_beam_size: int = 10,
+        lambda_coherence: float = 0.1,
+        normalize_coherence_scores: bool = True,
+        query_mode: str = 'original',
+        context_window_size: int = 1,
+        query_llm_model: Optional[str] = None,
+        use_query_cache: bool = True,
+        force_refresh_expansions: bool = False,
+        disable_llm_expansion: bool = False,
+        query_expansion_provider: Optional[str] = None,
     ) -> Optional[Path]:
         """
         Run the complete pipeline.
@@ -224,7 +237,12 @@ class VideoSequencingPipeline:
                 logger.info(f"ENCODER: VideoPrism ({videoprism_model}) - Temporal video understanding")
             if match_only:
                 logger.info("MODE: Match-Only Test Mode (Bypassing transcription & duration constraints)")
-            if use_optimal:
+            if assignment_method == 'coherence_beam':
+                logger.info(
+                    "MATCHING: Coherence Beam Search (top_k=%s, beam_size=%s, lambda=%.4f, normalize=%s)",
+                    coherence_top_k, coherence_beam_size, lambda_coherence, normalize_coherence_scores,
+                )
+            elif use_optimal:
                 logger.info("MATCHING: Optimal (Hungarian Algorithm)")
             else:
                 logger.info("MATCHING: Greedy (Sequential)")
@@ -232,6 +250,10 @@ class VideoSequencingPipeline:
                 logger.info(f"WINDOWING: Enabled (window_size={window_size}s, overlap={window_overlap})")
             else:
                 logger.info("WINDOWING: Disabled (full video indexing)")
+            logger.info(
+                "QUERY MODE: %s (context_window_size=%s)",
+                query_mode, context_window_size,
+            )
             if not allow_reuse:
                 logger.info("REUSE: Disabled (Each segment will have a unique clip)")
             if ground_truth_file:
@@ -312,7 +334,19 @@ class VideoSequencingPipeline:
                 dual_softmax_temp=dual_softmax_temp,
                 ground_truth_file=ground_truth_file,
                 prompt_mode=prompt_mode,
-                llm_prompts=llm_prompts
+                llm_prompts=llm_prompts,
+                assignment_method=assignment_method,
+                coherence_top_k=coherence_top_k,
+                coherence_beam_size=coherence_beam_size,
+                lambda_coherence=lambda_coherence,
+                normalize_coherence_scores=normalize_coherence_scores,
+                query_mode=query_mode,
+                context_window_size=context_window_size,
+                query_llm_model=query_llm_model or llm_model,
+                use_query_cache=use_query_cache,
+                force_refresh_expansions=force_refresh_expansions,
+                disable_llm_expansion=disable_llm_expansion,
+                query_expansion_provider=query_expansion_provider,
             )
             if clip_selections is None:
                 return None
@@ -536,7 +570,19 @@ class VideoSequencingPipeline:
         dual_softmax_temp: float = 0.05,
         ground_truth_file: str = None,
         prompt_mode: str = 'none',
-        llm_prompts: Optional[Dict[str, List[str]]] = None
+        llm_prompts: Optional[Dict[str, List[str]]] = None,
+        assignment_method: str = 'hungarian',
+        coherence_top_k: int = 5,
+        coherence_beam_size: int = 10,
+        lambda_coherence: float = 0.1,
+        normalize_coherence_scores: bool = True,
+        query_mode: str = 'original',
+        context_window_size: int = 1,
+        query_llm_model: Optional[str] = None,
+        use_query_cache: bool = True,
+        force_refresh_expansions: bool = False,
+        disable_llm_expansion: bool = False,
+        query_expansion_provider: Optional[str] = None,
     ):
         """Match script segments to video clips"""
         try:
@@ -553,16 +599,37 @@ class VideoSequencingPipeline:
                 else:
                     self.matcher = VideoTextMatcher(self.indexer)
             
-            # Convert segments to dict format expected by create_sequence
-            segment_dicts = [
+            # Convert segments to dict format expected by create_sequence.
+            # Query expansion may replace 'text' with a richer retrieval query,
+            # while 'original_text' remains the script segment used for evaluation.
+            segment_dicts_original = [
                 {
                     'text': seg.text,
+                    'original_text': seg.text,
                     'duration': seg.duration,
                     'start_time': seg.start_time,
                     'end_time': seg.end_time
                 }
                 for seg in segments
             ]
+            query_config = config_from_values(
+                query_mode=query_mode,
+                context_window_size=context_window_size,
+                llm_model=query_llm_model,
+                use_query_cache=use_query_cache,
+                force_refresh_expansions=force_refresh_expansions,
+                disable_llm_calls=disable_llm_expansion,
+                provider=query_expansion_provider,
+            )
+            segment_dicts, query_metadata = build_query_expansions(
+                segment_dicts_original,
+                config=query_config,
+                cache_root=self.cache_dir,
+            )
+            logger.info(
+                "Retrieval query mode: %s | cache_used=%s | cache_path=%s",
+                query_metadata.get('query_mode'), query_metadata.get('cache_used'), query_metadata.get('cache_path'),
+            )
             
             # Compute similarity matrix if we need it for benchmarking
             similarity_matrix = None
@@ -581,20 +648,42 @@ class VideoSequencingPipeline:
                 )
             
             # Create sequence
+            if assignment_method == 'coherence_beam' and self._encoder != 'videoprism':
+                raise ValueError("coherence_beam assignment is currently supported only for the VideoPrism pipeline")
+            logger.info(
+                "Assignment method: %s | top_k=%s | beam_size=%s | lambda_coherence=%.4f | normalize_scores=%s",
+                assignment_method, coherence_top_k, coherence_beam_size, lambda_coherence, normalize_coherence_scores,
+            )
             clip_selections = create_sequence(
                 segment_dicts,
                 self.matcher,
                 match_only=match_only,
                 allow_reuse=allow_reuse,
-                use_optimal=use_optimal
+                use_optimal=use_optimal,
+                assignment_method=assignment_method,
+                top_k=coherence_top_k,
+                beam_size=coherence_beam_size,
+                lambda_coherence=lambda_coherence,
+                normalize_scores=normalize_coherence_scores,
             )
             
             if not clip_selections:
                 logger.error("No clips were selected")
                 return None
             
+            assignment_diagnostics = getattr(self.matcher, 'last_assignment_diagnostics', None) or {
+                'assignment_method': 'hungarian' if use_optimal else 'greedy',
+                'params': {
+                    'allow_reuse': allow_reuse,
+                    'match_only': match_only,
+                },
+            }
+            assignment_diagnostics['query_generation'] = query_metadata
+
             # Save selections
             selections_data = {
+                'assignment_metadata': assignment_diagnostics,
+                'query_generation': query_metadata,
                 'clips': [
                     {
                         'segment_id': c.segment_id,
@@ -603,7 +692,9 @@ class VideoSequencingPipeline:
                         'trim_start': c.trim_start,
                         'trim_end': c.trim_end,
                         'similarity_score': c.similarity_score,
-                        'is_reused': c.is_reused
+                        'is_reused': c.is_reused,
+                        'original_text': segment_dicts[c.segment_id].get('original_text', ''),
+                        'final_query': segment_dicts[c.segment_id].get('text', '')
                     }
                     for c in clip_selections
                 ]
@@ -684,7 +775,8 @@ class VideoSequencingPipeline:
                         all_metadata=all_metadata,
                         matching_mode='optimal' if use_optimal else 'greedy',
                         allow_reuse=allow_reuse,
-                        match_only=match_only
+                        match_only=match_only,
+                        assignment_metadata=assignment_diagnostics,
                     )
                     
                     # Print results to console
@@ -891,6 +983,40 @@ Examples:
         help='Temperature scaling factor for dual softmax (default: 0.05)'
     )
     parser.add_argument(
+        '--assignment-method',
+        default='hungarian',
+        choices=['hungarian', 'coherence_beam'],
+        help='Global assignment method for VideoPrism: hungarian or coherence_beam (default: hungarian)'
+    )
+    parser.add_argument('--coherence-top-k', type=int, default=5, help='Top-K candidates per segment for coherence beam search')
+    parser.add_argument('--coherence-beam-size', type=int, default=10, help='Beam size for coherence beam search')
+    parser.add_argument('--lambda-coherence', type=float, default=0.1, help='Weight for neighboring clip coherence')
+    parser.add_argument(
+        '--coherence-allow-reuse',
+        action='store_true',
+        default=False,
+        help='Allow coherence beam search to reuse the same clip; disabled by default for this experimental assignment method'
+    )
+    parser.add_argument(
+        '--no-normalize-coherence-scores',
+        action='store_false',
+        dest='normalize_coherence_scores',
+        default=True,
+        help='Disable score normalization for coherence beam search'
+    )
+    parser.add_argument('--query-mode', default='original', choices=['original', 'context_window', 'llm_expanded', 'hybrid_llm'],
+                        help='Retrieval query generation mode (default: original)')
+    parser.add_argument('--context-window-size', type=int, default=1, help='Neighboring segment window for query generation (0-3)')
+    parser.add_argument('--query-llm-model', default=None, help='LLM model for llm_expanded/hybrid_llm query modes')
+    parser.add_argument('--no-query-cache', action='store_false', dest='use_query_cache', default=True,
+                        help='Disable reading/writing cached query expansions')
+    parser.add_argument('--force-refresh-expansions', action='store_true',
+                        help='Regenerate query expansions even when a cache file exists')
+    parser.add_argument('--disable-llm-expansion', action='store_true',
+                        help='Do not call an LLM for query expansion; useful with pre-existing caches')
+    parser.add_argument('--query-expansion-provider', default=None, choices=['mock', 'ollama', 'openai', 'openai_compatible'],
+                        help='Provider for LLM query expansion; defaults to OPENAI_API_KEY when set, otherwise Ollama')
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -968,6 +1094,10 @@ Examples:
         gpu_device=args.gpu_device
     )
     
+    effective_allow_reuse = args.allow_reuse
+    if args.assignment_method == 'coherence_beam':
+        effective_allow_reuse = args.coherence_allow_reuse
+
     output_video = pipeline.run(
         llm_model=args.llm_model,
         whisper_model=args.whisper_model,
@@ -975,7 +1105,7 @@ Examples:
         use_simple_segmentation=args.simple_segmentation,
         manual_segments_file=args.segments,
         match_only=args.match_only,
-        allow_reuse=args.allow_reuse,
+        allow_reuse=effective_allow_reuse,
         use_optimal=args.use_optimal,
         use_dual_softmax=args.use_dual_softmax,
         dual_softmax_temp=args.dual_softmax_temp,
@@ -984,7 +1114,19 @@ Examples:
         window_size=args.window_size,
         window_overlap=args.window_overlap,
         encoder=args.encoder,
-        openclip_model=args.openclip_model
+        openclip_model=args.openclip_model,
+        assignment_method=args.assignment_method,
+        coherence_top_k=args.coherence_top_k,
+        coherence_beam_size=args.coherence_beam_size,
+        lambda_coherence=args.lambda_coherence,
+        normalize_coherence_scores=args.normalize_coherence_scores,
+        query_mode=args.query_mode,
+        context_window_size=args.context_window_size,
+        query_llm_model=args.query_llm_model,
+        use_query_cache=args.use_query_cache,
+        force_refresh_expansions=args.force_refresh_expansions,
+        disable_llm_expansion=args.disable_llm_expansion,
+        query_expansion_provider=args.query_expansion_provider,
     )
     
     if output_video:

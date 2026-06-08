@@ -42,6 +42,7 @@ from matching import ClipSelection, EnsembleVideoTextMatcher, PromptedVideoTextM
 from menu import discover_benchmark_numbers
 from models import VideoMetadata
 from openclip_indexing import DEFAULT_ENSEMBLE_TEMPLATES, OpenCLIPTextMatcher, OpenCLIPVideoIndexer, PROMPT_TEMPLATES
+from query_expansion import build_query_expansions, config_from_values
 from server_runtime import (
     SERVER_LOG_FILE,
     SERVER_PORT,
@@ -181,6 +182,7 @@ class WebJob:
     finished_at: Optional[str] = None
     returncode: Optional[int] = None
     pid: Optional[int] = None
+    cancellation_requested: bool = False
     log_lines: List[str] = field(default_factory=list)
 
     def snapshot(self) -> Dict[str, Any]:
@@ -647,6 +649,7 @@ class BenchmarkManager:
 class JobManager:
     def __init__(self) -> None:
         self._jobs: Dict[str, WebJob] = {}
+        self._processes: Dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
 
     def submit(self, name: str, command: List[str], cwd: Path = PROJECT_ROOT) -> Dict[str, Any]:
@@ -672,9 +675,78 @@ class JobManager:
             job = self._jobs[job_id]
             return job.snapshot()
 
+    def stop_job(self, job_id: str) -> Dict[str, Any]:
+        with self._lock:
+            if job_id not in self._jobs:
+                raise KeyError(job_id)
+            job = self._jobs[job_id]
+            if job.status in {"succeeded", "failed", "canceled"}:
+                job.log_lines.append("\n[webapp] Stop requested, but the job is already finished.\n")
+                return job.snapshot()
+            job.cancellation_requested = True
+            job.status = "stopping"
+            job.log_lines.append("\n[webapp] Stop requested from the Operations tab. Terminating process group...\n")
+            process = self._processes.get(job_id)
+            pid = job.pid
+
+        if process and process.poll() is None:
+            self._terminate_process_group(process)
+        elif pid:
+            self._terminate_pid(pid)
+
+        with self._lock:
+            job = self._jobs[job_id]
+            job.status = "canceled"
+            job.finished_at = job.finished_at or _now_iso()
+            if job.returncode is None:
+                job.returncode = -int(signal.SIGTERM)
+            job.log_lines.append("[webapp] Job canceled.\n")
+            self._processes.pop(job_id, None)
+            return job.snapshot()
+
+    def _terminate_process_group(self, process: subprocess.Popen) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception:
+            try:
+                process.terminate()
+            except Exception:
+                return
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=2)
+        except Exception:
+            pass
+
+    def _terminate_pid(self, pid: int) -> None:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                return
+
     def _run_job(self, job_id: str) -> None:
         with self._lock:
             job = self._jobs[job_id]
+            if job.cancellation_requested:
+                job.status = "canceled"
+                job.finished_at = _now_iso()
+                return
             job.status = "running"
             job.started_at = _now_iso()
 
@@ -686,9 +758,11 @@ class JobManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                start_new_session=True,
             )
             with self._lock:
                 self._jobs[job_id].pid = process.pid
+                self._processes[job_id] = process
             assert process.stdout is not None
             for line in process.stdout:
                 with self._lock:
@@ -697,14 +771,21 @@ class JobManager:
                         self._jobs[job_id].log_lines = self._jobs[job_id].log_lines[-4000:]
             process.wait()
             with self._lock:
-                self._jobs[job_id].returncode = process.returncode
-                self._jobs[job_id].status = "succeeded" if process.returncode == 0 else "failed"
-                self._jobs[job_id].finished_at = _now_iso()
+                job = self._jobs[job_id]
+                job.returncode = process.returncode
+                if job.cancellation_requested or job.status in {"stopping", "canceled"}:
+                    job.status = "canceled"
+                else:
+                    job.status = "succeeded" if process.returncode == 0 else "failed"
+                job.finished_at = _now_iso()
+                self._processes.pop(job_id, None)
         except Exception as exc:
             with self._lock:
-                self._jobs[job_id].status = "failed"
-                self._jobs[job_id].finished_at = _now_iso()
-                self._jobs[job_id].log_lines.append(f"\n[webapp] Job runner failed: {exc}\n")
+                job = self._jobs[job_id]
+                job.status = "canceled" if job.cancellation_requested else "failed"
+                job.finished_at = _now_iso()
+                job.log_lines.append(f"\n[webapp] Job runner failed: {exc}\n")
+                self._processes.pop(job_id, None)
 
 
 def _resolve_path(value: Optional[str]) -> Optional[str]:
@@ -874,6 +955,11 @@ def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any],
         ("keyword_weight", "keyword_weight"),
         ("enable_face_detection", "enable_face_detection"),
         ("enable_object_detection", "enable_object_detection"),
+        ("assignment_method", "assignment_method"),
+        ("top_k", "coherence_top_k"),
+        ("beam_size", "coherence_beam_size"),
+        ("lambda_coherence", "lambda_coherence"),
+        ("normalize_scores", "normalize_coherence_scores"),
     ]:
         if source_key in grid_config:
             config[target_key] = grid_config[source_key]
@@ -933,6 +1019,15 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         command.extend(["--encoder", encoder])
         if encoder == "openclip":
             command.extend(["--openclip-model", payload.get("openclip_model", settings.get("openclip_model", "ViT-B-32"))])
+        if payload.get("query_mode") and payload.get("query_mode") != "original":
+            command.extend(["--query-mode", payload.get("query_mode")])
+            command.extend(["--context-window-size", str(payload.get("context_window_size", 1))])
+            if payload.get("query_llm_model"):
+                command.extend(["--query-llm-model", payload["query_llm_model"]])
+            if payload.get("force_refresh_expansions"):
+                command.append("--force-refresh-expansions")
+            if payload.get("disable_llm_expansion"):
+                command.append("--disable-llm-expansion")
         if resolved["audio"] and payload.get("include_audio"):
             command.extend(["--audio", resolved["audio"]])
         if payload.get("verbose", True):
@@ -964,6 +1059,17 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         command.extend(["--encoder", encoder])
         if encoder == "openclip":
             command.extend(["--openclip-model", payload.get("openclip_model", settings.get("openclip_model", "ViT-B-32"))])
+        if payload.get("query_mode") and payload.get("query_mode") != "original":
+            command.extend(["--query-mode", payload.get("query_mode")])
+            command.extend(["--context-window-size", str(payload.get("context_window_size", 1))])
+            if payload.get("query_llm_model"):
+                command.extend(["--query-llm-model", payload["query_llm_model"]])
+            if not payload.get("use_query_cache", True):
+                command.append("--no-query-cache")
+            if payload.get("force_refresh_expansions"):
+                command.append("--force-refresh-expansions")
+            if payload.get("disable_llm_expansion"):
+                command.append("--disable-llm-expansion")
         if payload.get("no_windowing", False):
             command.append("--no-windowing")
         else:
@@ -1008,7 +1114,33 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         ]
         command.extend(["--models"] + payload.get("models", ["videoprism_lvt_public_v1_base", "videoprism_lvt_public_v1_large"]))
         command.extend(["--frames"] + [str(item) for item in payload.get("frames", [8, 16, 32])])
+        if payload.get("resolutions"):
+            command.extend(["--resolutions"] + [str(item) for item in payload["resolutions"]])
+        if payload.get("dual_softmax"):
+            command.extend(["--dual-softmax"] + [str(item).lower() for item in payload["dual_softmax"]])
         command.extend(["--prompt-modes"] + payload.get("prompt_modes", ["none", "template:video", "template:photo", "template:scene", "template:cooking"]))
+        if payload.get("assignment_methods"):
+            command.extend(["--assignment-methods"] + payload["assignment_methods"])
+        if payload.get("coherence_top_k"):
+            command.extend(["--coherence-top-k"] + [str(item) for item in payload["coherence_top_k"]])
+        if payload.get("coherence_beam_sizes"):
+            command.extend(["--coherence-beam-sizes"] + [str(item) for item in payload["coherence_beam_sizes"]])
+        if payload.get("lambda_coherence_values"):
+            command.extend(["--lambda-coherence-values"] + [str(item) for item in payload["lambda_coherence_values"]])
+        if payload.get("disable_normalize_coherence_scores"):
+            command.append("--no-normalize-coherence-scores")
+        if payload.get("query_modes"):
+            command.extend(["--query-modes"] + payload["query_modes"])
+        if payload.get("context_window_sizes"):
+            command.extend(["--context-window-sizes"] + [str(item) for item in payload["context_window_sizes"]])
+        if payload.get("query_llm_model"):
+            command.extend(["--query-llm-model", payload["query_llm_model"]])
+        if not payload.get("use_query_cache", True):
+            command.append("--no-query-cache")
+        if payload.get("force_refresh_expansions"):
+            command.append("--force-refresh-expansions")
+        if payload.get("disable_llm_expansion"):
+            command.append("--disable-llm-expansion")
         if payload.get("llm_model"):
             command.extend(["--llm-model", payload["llm_model"]])
         if payload.get("reset_llm_cache"):
@@ -1150,6 +1282,19 @@ class EditorSessionManager:
             "prompt_template": payload.get("prompt_template"),
             "ensemble_prompts": payload.get("ensemble_prompts"),
             "use_best_grid_search": bool(payload.get("use_best_grid_search", True)),
+            "assignment_method": payload.get("assignment_method", "hungarian"),
+            "coherence_top_k": payload.get("coherence_top_k", 5),
+            "coherence_beam_size": payload.get("coherence_beam_size", 10),
+            "lambda_coherence": payload.get("lambda_coherence", 0.1),
+            "normalize_coherence_scores": bool(payload.get("normalize_coherence_scores", True)),
+            "query_mode": payload.get("query_mode", "original"),
+            "context_window_size": int(payload.get("context_window_size", 1)),
+            "query_llm_model": payload.get("query_llm_model") or payload.get("llm_model") or settings.get("llm_model", "llama3.2:3b"),
+            "use_query_cache": bool(payload.get("use_query_cache", True)),
+            "force_refresh_expansions": bool(payload.get("force_refresh_expansions", False)),
+            "disable_llm_expansion": bool(payload.get("disable_llm_expansion", False)),
+            "query_generation": {},
+            "assignment_diagnostics": {},
         }
         if benchmark and session.config["use_best_grid_search"]:
             best_grid = load_best_grid_search_config(settings.get("output", "./output"), benchmark, retrieval_mode)
@@ -1583,20 +1728,57 @@ class EditorSessionManager:
             for segment in runtime.session.segments:
                 self._regenerate_segment_candidates(runtime, segment.segment_id)
 
-    def _regenerate_exact_matching(self, runtime: EditorRuntime) -> None:
-        from matching import create_sequence_optimal
-        
-        script_segments = [
-            {'text': self._build_query_text(seg), 'duration': max(0.2, seg.duration * seg.duration_multiplier)}
+    def _build_query_segments(self, runtime: EditorRuntime) -> List[Dict[str, Any]]:
+        base_segments = [
+            {
+                'text': self._build_query_text(seg),
+                'original_text': seg.text,
+                'duration': max(0.2, seg.duration * seg.duration_multiplier),
+                'segment_id': seg.segment_id,
+            }
             for seg in runtime.session.segments
         ]
+        query_config = config_from_values(
+            query_mode=runtime.session.config.get("query_mode", "original"),
+            context_window_size=int(runtime.session.config.get("context_window_size", 1)),
+            llm_model=runtime.session.config.get("query_llm_model") or runtime.session.config.get("llm_model"),
+            use_query_cache=bool(runtime.session.config.get("use_query_cache", True)),
+            force_refresh_expansions=bool(runtime.session.config.get("force_refresh_expansions", False)),
+            disable_llm_calls=bool(runtime.session.config.get("disable_llm_expansion", False)),
+        )
+        query_segments, query_metadata = build_query_expansions(
+            base_segments,
+            config=query_config,
+            cache_root=Path(runtime.session.cache_dir),
+        )
+        runtime.session.config["query_generation"] = query_metadata
+        return query_segments
+
+    def _regenerate_exact_matching(self, runtime: EditorRuntime) -> None:
+        from matching import create_sequence
         
-        sequence = create_sequence_optimal(
+        script_segments = self._build_query_segments(runtime)
+        assignment_method = runtime.session.config.get("assignment_method", "hungarian")
+        if runtime.session.retrieval_mode != "videoprism" and assignment_method == "coherence_beam":
+            assignment_method = "hungarian"
+        
+        sequence = create_sequence(
             script_segments=script_segments,
             video_matcher=runtime.matcher,
             match_only=True,
-            allow_reuse=False
+            allow_reuse=False,
+            use_optimal=True,
+            assignment_method=assignment_method,
+            top_k=int(runtime.session.config.get("coherence_top_k", 5)),
+            beam_size=int(runtime.session.config.get("coherence_beam_size", 10)),
+            lambda_coherence=float(runtime.session.config.get("lambda_coherence", 0.1)),
+            normalize_scores=bool(runtime.session.config.get("normalize_coherence_scores", True)),
         )
+        runtime.session.config["assignment_diagnostics"] = getattr(runtime.matcher, "last_assignment_diagnostics", None) or {
+            "assignment_method": assignment_method,
+            "params": {"allow_reuse": False, "match_only": True},
+        }
+        runtime.session.config["assignment_diagnostics"]["query_generation"] = runtime.session.config.get("query_generation", {})
         
         for seg, selection in zip(runtime.session.segments, sequence):
             candidate_dict = {
@@ -1688,7 +1870,8 @@ class EditorSessionManager:
     def _regenerate_segment_candidates(self, runtime: EditorRuntime, segment_id: int) -> None:
         segment = runtime.session.segments[segment_id]
         effective_duration = max(0.2, segment.duration * segment.duration_multiplier)
-        query_text = self._build_query_text(segment)
+        query_segments = self._build_query_segments(runtime)
+        query_text = query_segments[segment_id]['text']
         matcher = runtime.matcher
 
         candidates = matcher.match_segment_to_videos(
