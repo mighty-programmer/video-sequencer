@@ -260,6 +260,8 @@ class VideoPrismGridSearch:
             score_normalizations = ['none']
         if csls_k_list is None:
             csls_k_list = [5]
+        csls_k_list = [int(item) for item in csls_k_list]
+        baseline_csls_k = csls_k_list[0]
         if query_modes is None:
             query_modes = ['original']
         if context_window_sizes is None:
@@ -278,6 +280,9 @@ class VideoPrismGridSearch:
         ) in base_product:
             if score_normalization != 'none' and use_dual_softmax:
                 # Keep matrix normalizers mutually exclusive so runs remain interpretable.
+                continue
+            if score_normalization == 'none' and int(csls_k) != baseline_csls_k:
+                # CSLS k has no effect without CSLS, so avoid duplicate baselines.
                 continue
             beam_param_product = [(5, 10, 0.0)]
             if assignment_method == 'coherence_beam':
