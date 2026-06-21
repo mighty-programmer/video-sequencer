@@ -118,6 +118,21 @@ class VideoPrismGridSearchResult:
     total_time: float
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert NumPy values in result payloads into JSON-serializable types."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 # Matcher subclasses are defined in matching.py and imported above.
 # _PromptedVideoTextMatcher  -> PromptedVideoTextMatcher
 # _EnsembleVideoTextMatcher  -> EnsembleVideoTextMatcher
@@ -700,9 +715,10 @@ class VideoPrismGridSearch:
             'ground_truth_file': self.ground_truth_file,
             'results': [asdict(r) for r in self.results]
         }
+        serializable_results_data = _json_safe(results_data)
         
         with open(output_path, 'w') as f:
-            json.dump(results_data, f, indent=2)
+            json.dump(serializable_results_data, f, indent=2)
             
         summary_text = self._generate_summary_text(elapsed, limit=30)
         with open(txt_path, 'w', encoding='utf-8') as f:
@@ -712,7 +728,7 @@ class VideoPrismGridSearch:
             benchmark_token = Path(self.video_dir).name.replace('video_', 'benchmark_')
             coherence_path = self.output_dir / f'{benchmark_token}_videoprism_coherence_beam_results.json'
             with open(coherence_path, 'w') as f:
-                json.dump(results_data, f, indent=2)
+                json.dump(serializable_results_data, f, indent=2)
             logger.info(f"Saved coherence beam comparison results to {coherence_path}")
 
         logger.info(f"Saved grid search results to {output_path} and {txt_path}")
