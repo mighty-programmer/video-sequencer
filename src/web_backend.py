@@ -170,6 +170,25 @@ def _safe_relpath(path: Path, start: Path) -> str:
         return str(path)
 
 
+GRID_TOTAL_PATTERN = re.compile(
+    r"(?:Generated|STARTING[\w\-\s]*GRID SEARCH:)\s+(\d+)\s+configurations",
+    re.IGNORECASE,
+)
+GRID_STEP_PATTERN = re.compile(r"\[(\d+)\s*/\s*(\d+)\]\s+Running configuration", re.IGNORECASE)
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 @dataclass
 class WebJob:
     job_id: str
@@ -188,7 +207,67 @@ class WebJob:
     def snapshot(self) -> Dict[str, Any]:
         payload = asdict(self)
         payload["log"] = "".join(self.log_lines[-600:])
+        payload["progress"] = self.progress_snapshot()
         return payload
+
+    def progress_snapshot(self) -> Optional[Dict[str, Any]]:
+        log_text = "".join(self.log_lines[-1200:])
+        step_matches = list(GRID_STEP_PATTERN.finditer(log_text))
+        total_matches = list(GRID_TOTAL_PATTERN.finditer(log_text))
+
+        total = int(total_matches[-1].group(1)) if total_matches else None
+        current = None
+        if step_matches:
+            current = int(step_matches[-1].group(1))
+            total = int(step_matches[-1].group(2))
+
+        if not total:
+            return None
+
+        terminal = self.status in {"succeeded", "failed", "canceled"}
+        if self.status == "succeeded":
+            completed = total
+            label = f"Completed {total}/{total} configurations"
+        elif current:
+            completed = max(0, min(total, current - 1))
+            label = f"Running configuration {current}/{total}"
+        else:
+            completed = 0
+            label = f"Preparing {total} configurations"
+
+        if terminal and self.status != "succeeded":
+            label = f"{self.status.capitalize()} after {completed}/{total} configurations"
+
+        started = _parse_iso_datetime(self.started_at)
+        finished = _parse_iso_datetime(self.finished_at)
+        now = finished or datetime.now(timezone.utc)
+        elapsed_seconds = None
+        eta_seconds = None
+        if started:
+            elapsed_seconds = max(0.0, (now - started).total_seconds())
+            if self.status == "running" and elapsed_seconds > 0:
+                rate_units = completed
+                if current and completed == 0:
+                    # The first configuration is already doing useful work, even
+                    # though it has not completed yet.
+                    rate_units = 0.5
+                elif current:
+                    rate_units = max(completed, current - 0.5)
+                if rate_units > 0:
+                    seconds_per_unit = elapsed_seconds / rate_units
+                    eta_seconds = max(0, int(seconds_per_unit * max(0, total - rate_units)))
+
+        percent = 100.0 if self.status == "succeeded" else (completed / total) * 100.0
+        return {
+            "kind": "grid-search",
+            "total": total,
+            "current": current,
+            "completed": completed,
+            "percent": round(max(0.0, min(100.0, percent)), 1),
+            "label": label,
+            "elapsed_seconds": int(elapsed_seconds) if elapsed_seconds is not None else None,
+            "eta_seconds": eta_seconds,
+        }
 
 
 @dataclass
@@ -1427,6 +1506,8 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         ]
         if payload.get("no_windowing", True):
             command.append("--no-windowing")
+        if payload.get("fast_mode"):
+            command.append("--fast-mode")
         return ("Compare All Models", command)
 
     raise ValueError(f"Unsupported job action: {action}")

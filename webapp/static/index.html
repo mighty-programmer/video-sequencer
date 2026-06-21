@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Sequencer Studio</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260621-benchmark-analysis" />
+    <link rel="stylesheet" href="/static/app.css?v=20260621-grid-progress" />
   </head>
   <body>
     <div class="shell">
@@ -524,6 +524,7 @@
                   </select>
                 </label>
                 <label>LLM Model <input id="compareLLM" type="text" value="llama3.2:3b" /></label>
+                <label class="toggle"><input id="compareFastMode" type="checkbox" />FAST MODE</label>
                 <label class="toggle"><input id="compareNoWindowing" type="checkbox" checked />Disable Windowing</label>
                 <button class="primary" data-job-action="compare-all-models">Run Comparison</button>
               </div>
@@ -638,6 +639,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260621-benchmark-analysis" type="module"></script>
+    <script src="/static/app.js?v=20260621-grid-progress" type="module"></script>
   </body>
 </html>

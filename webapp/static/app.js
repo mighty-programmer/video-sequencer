@@ -96,6 +96,17 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  if (minutes < 60) return secs ? `${minutes}m ${secs}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
 function formatMetric(value, suffix = "") {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return "n/a";
@@ -397,6 +408,27 @@ function isJobStoppable(job) {
   return ["queued", "running", "stopping"].includes(job?.status);
 }
 
+function jobProgressHtml(job) {
+  const progress = job?.progress;
+  if (!progress) return "";
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const eta = progress.eta_seconds == null ? "ETA calculating..." : `ETA ${formatDuration(progress.eta_seconds)}`;
+  const elapsed = progress.elapsed_seconds == null ? "" : `Elapsed ${formatDuration(progress.elapsed_seconds)}`;
+  const detail = [elapsed, job.status === "running" ? eta : null].filter(Boolean).join(" · ");
+  return `
+    <div class="job-progress" aria-label="${escapeHtml(progress.label)}">
+      <div class="job-progress-meta">
+        <span>${escapeHtml(progress.label)}</span>
+        <span>${percent.toFixed(1)}%</span>
+      </div>
+      <div class="job-progress-track">
+        <div class="job-progress-fill" style="width: ${percent}%"></div>
+      </div>
+      ${detail ? `<div class="muted">${escapeHtml(detail)}</div>` : ""}
+    </div>
+  `;
+}
+
 function renderJobs() {
   const list = $("jobList");
   const log = $("jobLog");
@@ -409,9 +441,10 @@ function renderJobs() {
     node.className = `job-item ${job.status} ${job.job_id === state.selectedJobId ? "selected" : ""}`;
     const canStop = isJobStoppable(job);
     node.innerHTML = `
-      <div>
+      <div class="job-main">
         <strong>${job.name}</strong>
         <div class="muted">${job.status} · PID ${job.pid || "pending"} · ${job.created_at}</div>
+        ${jobProgressHtml(job)}
       </div>
       <div class="launch-actions">
         <button class="ghost" data-job-id="${job.job_id}">View Log</button>
@@ -1124,6 +1157,7 @@ async function submitJob(action) {
     "compare-all-models": {
       benchmark: $("compareBenchmark").value.trim(),
       llm_model: $("compareLLM").value.trim(),
+      fast_mode: $("compareFastMode").checked,
       no_windowing: $("compareNoWindowing").checked,
     },
   };

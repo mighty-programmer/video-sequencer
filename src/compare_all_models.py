@@ -157,6 +157,11 @@ def main():
     parser.add_argument('--llm-model', default='llama3.2:3b', help='LLM model to use for shared prompts')
     parser.add_argument('--device', default='cuda:0', help='GPU Device')
     parser.add_argument('--no-windowing', action='store_true', help='Disable temporal windowing')
+    parser.add_argument(
+        '--fast-mode',
+        action='store_true',
+        help='Run the compact thesis validation grid instead of the exhaustive sweep',
+    )
     
     args = parser.parse_args()
     
@@ -177,6 +182,9 @@ def main():
         devices = ['cuda:0']
         
     command_lists = {'openclip_compare': [], 'videoprism_compare': [], 'wav_compare': []}
+
+    if args.fast_mode:
+        logger.info("FAST MODE enabled: running compact validation grids only.")
     
     for bm in benchmarks:
         logger.info(f"\\n--- Setup for Benchmark {bm} ---")
@@ -223,41 +231,75 @@ def main():
         if args.no_windowing:
             common_args.append("--no-windowing")
             
-        # OpenCLIP Max Combinations (Gets GPU 0)
+        # OpenCLIP grid (Gets GPU 0)
         oc_args = common_args + [
             "--device", devices[0 % len(devices)],
             "--output", dirs['openclip']['out'],
             "--cache-dir", dirs['openclip']['cache'],
-            "--models", "ViT-B-32", "ViT-B-16", "ViT-L-14",
-            "--frames", "4", "8", "16", "32",
-            "--aggregations", "mean", "max", "best_frame",
-            "--prompt-modes", "none", "template:video", "template:photo", "template:cooking", "ensemble:template", "ensemble:llm",
         ]
+        if args.fast_mode:
+            oc_args.extend([
+                "--models", "ViT-L-14",
+                "--frames", "8", "16", "32",
+                "--aggregations", "best_frame", "mean",
+                "--prompt-modes", "none", "template:video", "ensemble:template", "ensemble:llm",
+            ])
+        else:
+            oc_args.extend([
+                "--models", "ViT-B-32", "ViT-B-16", "ViT-L-14",
+                "--frames", "4", "8", "16", "32",
+                "--aggregations", "mean", "max", "best_frame",
+                "--prompt-modes", "none", "template:video", "template:photo", "template:cooking", "ensemble:template", "ensemble:llm",
+            ])
         command_lists['openclip_compare'].append(shell_join([sys.executable, "src/grid_search.py", *oc_args]))
         
-        # VideoPrism Max Combinations (Gets GPU 1)
+        # VideoPrism grid (Gets GPU 1)
         vp_args = common_args + [
             "--device", devices[1 % len(devices)],
             "--output", dirs['videoprism']['out'],
             "--cache-dir", dirs['videoprism']['cache'],
             "--models", "videoprism_lvt_public_v1_base", "videoprism_lvt_public_v1_large",
-            "--frames", "8", "16", "32",
-            "--prompt-modes", "none", "template:video", "template:photo", "template:scene", "template:cooking", "ensemble:template", "ensemble:llm",
         ]
+        if args.fast_mode:
+            vp_args.extend([
+                "--frames", "8", "16",
+                "--resolutions", "288", "396",
+                "--dual-softmax", "true", "false",
+                "--prompt-modes", "none",
+                "--query-modes", "original",
+                "--assignment-methods", "hungarian",
+            ])
+        else:
+            vp_args.extend([
+                "--frames", "8", "16", "32",
+                "--prompt-modes", "none", "template:video", "template:photo", "template:scene", "template:cooking", "ensemble:template", "ensemble:llm",
+            ])
         command_lists['videoprism_compare'].append(shell_join([sys.executable, "src/videoprism_grid_search.py", *vp_args]))
         
-        # WAV Max Combinations (Gets GPU 2)
+        # WAV grid (Gets GPU 2)
         wav_args = common_args + [
             "--device", devices[2 % len(devices)],
             "--output", dirs['wav']['out'],
             "--cache-dir", dirs['wav']['cache'],
-            "--models", "ViT-B-32", "ViT-B-16", "ViT-L-14",
-            "--frames", "4", "8", "16", "32",
-            "--aggregations", "mean", "max", "best_frame",
-            "--prompt-modes", "none", "template:video", "template:photo", "template:cooking", "template:scene", "ensemble:template", "ensemble:llm",
-            "--pool-sizes", "5", "10", "20",
-            "--keyword-weights", "0.0", "0.1", "0.2", "0.3",
         ]
+        if args.fast_mode:
+            wav_args.extend([
+                "--models", "ViT-L-14",
+                "--frames", "8", "16", "32",
+                "--aggregations", "best_frame", "mean",
+                "--prompt-modes", "none", "template:video", "ensemble:template", "ensemble:llm",
+                "--pool-sizes", "5",
+                "--keyword-weights", "0.0",
+            ])
+        else:
+            wav_args.extend([
+                "--models", "ViT-B-32", "ViT-B-16", "ViT-L-14",
+                "--frames", "4", "8", "16", "32",
+                "--aggregations", "mean", "max", "best_frame",
+                "--prompt-modes", "none", "template:video", "template:photo", "template:cooking", "template:scene", "ensemble:template", "ensemble:llm",
+                "--pool-sizes", "5", "10", "20",
+                "--keyword-weights", "0.0", "0.1", "0.2", "0.3",
+            ])
         command_lists['wav_compare'].append(shell_join([sys.executable, "src/wav_grid_search.py", *wav_args]))
 
     create_summary_script(base_output, benchmarks)

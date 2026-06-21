@@ -503,6 +503,42 @@ button:disabled {
   border-left: 4px solid var(--red);
 }
 
+.job-main {
+  flex: 1;
+  min-width: 240px;
+}
+
+.job-progress {
+  margin-top: 10px;
+  max-width: 560px;
+}
+
+.job-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.job-progress-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(47, 51, 54, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(47, 51, 54, 0.06);
+}
+
+.job-progress-fill {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--yellow), var(--green));
+  transition: width 0.35s ease;
+}
+
 .job-log {
   margin: 16px 0 0;
   min-height: 280px;
