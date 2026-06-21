@@ -187,6 +187,8 @@ class VideoSequencingPipeline:
         use_optimal: bool = True,
         use_dual_softmax: bool = False,
         dual_softmax_temp: float = 0.05,
+        score_normalization: str = 'none',
+        csls_k: int = 5,
         prompt_mode: str = 'none',
         ground_truth_file: str = None,
         use_windowing: bool = True,
@@ -332,6 +334,8 @@ class VideoSequencingPipeline:
                 use_optimal=use_optimal,
                 use_dual_softmax=use_dual_softmax,
                 dual_softmax_temp=dual_softmax_temp,
+                score_normalization=score_normalization,
+                csls_k=csls_k,
                 ground_truth_file=ground_truth_file,
                 prompt_mode=prompt_mode,
                 llm_prompts=llm_prompts,
@@ -568,6 +572,8 @@ class VideoSequencingPipeline:
         use_optimal: bool = True,
         use_dual_softmax: bool = False,
         dual_softmax_temp: float = 0.05,
+        score_normalization: str = 'none',
+        csls_k: int = 5,
         ground_truth_file: str = None,
         prompt_mode: str = 'none',
         llm_prompts: Optional[Dict[str, List[str]]] = None,
@@ -642,6 +648,10 @@ class VideoSequencingPipeline:
                     matrix_kwargs["use_dual_softmax"] = use_dual_softmax
                 if "temperature" in matrix_signature.parameters:
                     matrix_kwargs["temperature"] = dual_softmax_temp
+                if "score_normalization" in matrix_signature.parameters:
+                    matrix_kwargs["score_normalization"] = score_normalization
+                if "csls_k" in matrix_signature.parameters:
+                    matrix_kwargs["csls_k"] = csls_k
                 similarity_matrix, all_metadata = self.matcher.compute_similarity_matrix(
                     segment_dicts,
                     **matrix_kwargs,
@@ -667,6 +677,8 @@ class VideoSequencingPipeline:
                 normalize_scores=normalize_coherence_scores,
                 use_dual_softmax=use_dual_softmax,
                 dual_softmax_temp=dual_softmax_temp,
+                score_normalization=score_normalization,
+                csls_k=csls_k,
             )
             
             if not clip_selections:
@@ -985,6 +997,18 @@ Examples:
         help='Temperature scaling factor for dual softmax (default: 0.05)'
     )
     parser.add_argument(
+        '--score-normalization',
+        default='none',
+        choices=['none', 'csls'],
+        help='Label-free similarity matrix normalization before assignment (default: none)'
+    )
+    parser.add_argument(
+        '--csls-k',
+        type=int,
+        default=5,
+        help='Neighbor count for CSLS score normalization (default: 5)'
+    )
+    parser.add_argument(
         '--assignment-method',
         default='hungarian',
         choices=['hungarian', 'coherence_beam'],
@@ -1111,6 +1135,8 @@ Examples:
         use_optimal=args.use_optimal,
         use_dual_softmax=args.use_dual_softmax,
         dual_softmax_temp=args.dual_softmax_temp,
+        score_normalization=args.score_normalization,
+        csls_k=args.csls_k,
         ground_truth_file=args.ground_truth,
         use_windowing=not args.no_windowing,
         window_size=args.window_size,

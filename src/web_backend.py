@@ -1057,6 +1057,8 @@ GRID_ANALYSIS_CONFIG_KEYS = [
     "num_frames",
     "resolution",
     "use_dual_softmax",
+    "score_normalization",
+    "csls_k",
     "aggregation",
     "prompt_mode",
     "assignment_method",
@@ -1253,6 +1255,8 @@ def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any],
         ("aggregation", "aggregation"),
         ("resolution", "videoprism_resolution"),
         ("use_dual_softmax", "use_dual_softmax"),
+        ("score_normalization", "score_normalization"),
+        ("csls_k", "csls_k"),
         ("candidate_pool_size", "candidate_pool_size"),
         ("keyword_weight", "keyword_weight"),
         ("enable_face_detection", "enable_face_detection"),
@@ -1430,6 +1434,10 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
             command.extend(["--resolutions"] + [str(item) for item in payload["resolutions"]])
         if payload.get("dual_softmax"):
             command.extend(["--dual-softmax"] + [str(item).lower() for item in payload["dual_softmax"]])
+        if payload.get("score_normalizations"):
+            command.extend(["--score-normalizations"] + payload["score_normalizations"])
+        if payload.get("csls_k"):
+            command.extend(["--csls-k"] + [str(item) for item in payload["csls_k"]])
         command.extend(["--prompt-modes"] + payload.get("prompt_modes", ["none", "template:video", "template:photo", "template:scene", "template:cooking"]))
         if payload.get("assignment_methods"):
             command.extend(["--assignment-methods"] + payload["assignment_methods"])
@@ -2089,6 +2097,9 @@ class EditorSessionManager:
             beam_size=int(runtime.session.config.get("coherence_beam_size", 10)),
             lambda_coherence=float(runtime.session.config.get("lambda_coherence", 0.1)),
             normalize_scores=bool(runtime.session.config.get("normalize_coherence_scores", True)),
+            use_dual_softmax=bool(runtime.session.config.get("use_dual_softmax", False)),
+            score_normalization=runtime.session.config.get("score_normalization", "none"),
+            csls_k=int(runtime.session.config.get("csls_k", 5)),
         )
         runtime.session.config["assignment_diagnostics"] = getattr(runtime.matcher, "last_assignment_diagnostics", None) or {
             "assignment_method": assignment_method,

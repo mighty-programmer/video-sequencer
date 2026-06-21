@@ -92,6 +92,8 @@ class VideoPrismGridSearchConfig:
     beam_size: int = 10
     lambda_coherence: float = 0.1
     normalize_scores: bool = True
+    score_normalization: str = 'none'
+    csls_k: int = 5
     query_mode: str = 'original'
     context_window_size: int = 1
     query_llm_model: Optional[str] = None
@@ -210,6 +212,8 @@ class VideoPrismGridSearch:
         coherence_beam_size_list: List[int] = None,
         lambda_coherence_list: List[float] = None,
         normalize_scores: bool = True,
+        score_normalizations: List[str] = None,
+        csls_k_list: List[int] = None,
         query_modes: List[str] = None,
         context_window_sizes: List[int] = None,
         query_llm_model: str = None,
@@ -252,6 +256,10 @@ class VideoPrismGridSearch:
             coherence_beam_size_list = [10]
         if lambda_coherence_list is None:
             lambda_coherence_list = [0.1]
+        if score_normalizations is None:
+            score_normalizations = ['none']
+        if csls_k_list is None:
+            csls_k_list = [5]
         if query_modes is None:
             query_modes = ['original']
         if context_window_sizes is None:
@@ -259,9 +267,18 @@ class VideoPrismGridSearch:
         
         configs = []
         base_product = itertools.product(
-            models, num_frames_list, resolutions_list, use_dual_softmax_list, prompt_modes, assignment_methods, query_modes, context_window_sizes
+            models, num_frames_list, resolutions_list, use_dual_softmax_list,
+            prompt_modes, assignment_methods, score_normalizations, csls_k_list,
+            query_modes, context_window_sizes
         )
-        for model, num_frames, resolution, use_dual_softmax, prompt_mode, assignment_method, query_mode, context_window_size in base_product:
+        for (
+            model, num_frames, resolution, use_dual_softmax, prompt_mode,
+            assignment_method, score_normalization, csls_k,
+            query_mode, context_window_size
+        ) in base_product:
+            if score_normalization != 'none' and use_dual_softmax:
+                # Keep matrix normalizers mutually exclusive so runs remain interpretable.
+                continue
             beam_param_product = [(5, 10, 0.0)]
             if assignment_method == 'coherence_beam':
                 beam_param_product = itertools.product(coherence_top_k_list, coherence_beam_size_list, lambda_coherence_list)
@@ -277,6 +294,8 @@ class VideoPrismGridSearch:
                     beam_size=int(beam_size),
                     lambda_coherence=float(lambda_coherence),
                     normalize_scores=normalize_scores,
+                    score_normalization=score_normalization,
+                    csls_k=int(csls_k),
                     query_mode=query_mode,
                     context_window_size=int(context_window_size),
                     query_llm_model=query_llm_model or llm_model,
@@ -360,7 +379,9 @@ class VideoPrismGridSearch:
         model_short = 'base' if 'base' in config.model_name else 'large'
         config_desc = (
             f"VP-{model_short} | {config.num_frames}f | {config.resolution}p | DualSM:{config.use_dual_softmax} | "
-            f"{config.prompt_mode} | query:{config.query_mode}/w{config.context_window_size} | assign:{config.assignment_method} | k:{config.top_k} | beam:{config.beam_size} | λ:{config.lambda_coherence}"
+            f"{config.prompt_mode} | norm:{config.score_normalization}/k{config.csls_k} | "
+            f"query:{config.query_mode}/w{config.context_window_size} | assign:{config.assignment_method} | "
+            f"k:{config.top_k} | beam:{config.beam_size} | λ:{config.lambda_coherence}"
         )
         logger.info(f"\n{'='*60}")
         logger.info(f"Testing: {config_desc}")
@@ -469,6 +490,8 @@ class VideoPrismGridSearch:
                 lambda_coherence=config.lambda_coherence,
                 normalize_scores=config.normalize_scores,
                 use_dual_softmax=config.use_dual_softmax,
+                score_normalization=config.score_normalization,
+                csls_k=config.csls_k,
             )
             assignment_metadata = getattr(matcher, 'last_assignment_diagnostics', None) or {
                 'assignment_method': config.assignment_method,
@@ -491,7 +514,9 @@ class VideoPrismGridSearch:
             similarity_matrix, all_metadata = matcher.compute_similarity_matrix(
                 query_segments, 
                 match_only=True,
-                use_dual_softmax=config.use_dual_softmax
+                use_dual_softmax=config.use_dual_softmax,
+                score_normalization=config.score_normalization,
+                csls_k=config.csls_k,
             )
             
             # 5. Evaluate against ground truth
@@ -546,6 +571,8 @@ class VideoPrismGridSearch:
         coherence_beam_size_list: List[int] = None,
         lambda_coherence_list: List[float] = None,
         normalize_scores: bool = True,
+        score_normalizations: List[str] = None,
+        csls_k_list: List[int] = None,
         query_modes: List[str] = None,
         context_window_sizes: List[int] = None,
         query_llm_model: str = None,
@@ -596,6 +623,8 @@ class VideoPrismGridSearch:
             coherence_beam_size_list=coherence_beam_size_list,
             lambda_coherence_list=lambda_coherence_list,
             normalize_scores=normalize_scores,
+            score_normalizations=score_normalizations,
+            csls_k_list=csls_k_list,
             query_modes=query_modes,
             context_window_sizes=context_window_sizes,
             query_llm_model=query_llm_model or llm_model,
@@ -711,7 +740,8 @@ class VideoPrismGridSearch:
             frames = str(cfg['num_frames'])
             res = str(cfg['resolution'])
             dualsm = "Yes" if cfg['use_dual_softmax'] else "No"
-            prompt = f"{cfg['prompt_mode']}|{cfg.get('query_mode', 'original')}"[:18]
+            norm = cfg.get('score_normalization', 'none')
+            prompt = f"{cfg['prompt_mode']}|{cfg.get('query_mode', 'original')}|{norm}"[:18]
             assignment = cfg.get('assignment_method', 'hungarian')[:16]
             
             marker = " ★" if i == 0 else "  "
@@ -737,6 +767,8 @@ class VideoPrismGridSearch:
             lines.append(f"║  Frames:       {cfg['num_frames']:<81} ║")
             lines.append(f"║  Resolution:   {cfg['resolution']:<81} ║")
             lines.append(f"║  Dual Softmax: {cfg['use_dual_softmax']:<81} ║")
+            lines.append(f"║  Score Norm:   {cfg.get('score_normalization', 'none'):<81} ║")
+            lines.append(f"║  CSLS k:       {cfg.get('csls_k', 5):<81} ║")
             lines.append(f"║  Prompt Mode:  {cfg['prompt_mode']:<81} ║")
             lines.append(f"║  Query Mode:   {cfg.get('query_mode', 'original'):<81} ║")
             lines.append(f"║  Context Win:  {cfg.get('context_window_size', 1):<81} ║")
@@ -754,6 +786,9 @@ class VideoPrismGridSearch:
             cmd += f" --videoprism-frames {cfg['num_frames']} --videoprism-resolution {cfg['resolution']}"
             if cfg.get('use_dual_softmax'):
                 cmd += " --use-dual-softmax"
+            if cfg.get('score_normalization', 'none') != 'none':
+                cmd += f" --score-normalization {cfg.get('score_normalization')}"
+                cmd += f" --csls-k {cfg.get('csls_k', 5)}"
             if cfg.get('query_mode', 'original') != 'original':
                 cmd += f" --query-mode {cfg.get('query_mode')} --context-window-size {cfg.get('context_window_size', 1)}"
                 if cfg.get('query_llm_model'):
@@ -882,6 +917,11 @@ Examples:
                        help='Lambda coherence weights for coherence beam search')
     parser.add_argument('--no-normalize-coherence-scores', action='store_false', dest='normalize_coherence_scores', default=True,
                        help='Disable score normalization for coherence beam search')
+    parser.add_argument('--score-normalizations', nargs='+', default=None,
+                       choices=['none', 'csls'],
+                       help='Label-free similarity matrix normalizers to test before assignment')
+    parser.add_argument('--csls-k', nargs='+', type=int, default=None,
+                       help='Neighbor counts for CSLS hubness correction')
     parser.add_argument('--query-modes', nargs='+', default=None,
                        choices=['original', 'context_window', 'llm_expanded', 'hybrid_llm'],
                        help='Retrieval query generation modes to test. Defaults to original only.')
@@ -965,6 +1005,8 @@ Examples:
         coherence_beam_size_list=args.coherence_beam_sizes,
         lambda_coherence_list=args.lambda_coherence_values,
         normalize_scores=args.normalize_coherence_scores,
+        score_normalizations=args.score_normalizations,
+        csls_k_list=args.csls_k,
         query_modes=args.query_modes,
         context_window_sizes=args.context_window_sizes,
         query_llm_model=args.query_llm_model,

@@ -47,6 +47,8 @@ def _compute_assignment_similarity_matrix(
     match_only: bool,
     use_dual_softmax: bool = False,
     dual_softmax_temp: float = 0.05,
+    score_normalization: str = 'none',
+    csls_k: int = 5,
 ) -> Tuple[np.ndarray, List]:
     """Compute the assignment matrix while respecting matcher-specific kwargs."""
     matrix_kwargs = {"match_only": match_only}
@@ -55,6 +57,10 @@ def _compute_assignment_similarity_matrix(
         matrix_kwargs["use_dual_softmax"] = use_dual_softmax
     if "temperature" in matrix_signature.parameters:
         matrix_kwargs["temperature"] = dual_softmax_temp
+    if "score_normalization" in matrix_signature.parameters:
+        matrix_kwargs["score_normalization"] = score_normalization
+    if "csls_k" in matrix_signature.parameters:
+        matrix_kwargs["csls_k"] = csls_k
     return video_matcher.compute_similarity_matrix(script_segments, **matrix_kwargs)
 
 
@@ -183,7 +189,9 @@ class VideoTextMatcher:
         script_segments: List[Dict],
         match_only: bool = False,
         use_dual_softmax: bool = False,
-        temperature: float = 0.05
+        temperature: float = 0.05,
+        score_normalization: str = 'none',
+        csls_k: int = 5,
     ) -> Tuple[np.ndarray, List]:
         """
         Compute the full similarity matrix between all segments and all videos.
@@ -193,6 +201,8 @@ class VideoTextMatcher:
             match_only: If True, use only raw cosine similarity
             use_dual_softmax: If True, applies dual softmax scaling over the matrix
             temperature: Temperature scaling factor for the softmax
+            score_normalization: Optional label-free post-processing ('none' or 'csls')
+            csls_k: Number of nearest neighbors used by CSLS hubness correction
             
         Returns:
             Tuple of (similarity_matrix, all_metadata)
@@ -250,7 +260,13 @@ class VideoTextMatcher:
                     )
                     similarity_matrix[seg_idx, vid_idx] = combined_score
         
-        if use_dual_softmax:
+        normalization = (score_normalization or 'none').lower()
+        if normalization not in {'none', 'csls'}:
+            raise ValueError(f"Unsupported score_normalization: {score_normalization}")
+
+        if normalization == 'csls':
+            similarity_matrix = self._apply_csls_normalization(similarity_matrix, k=csls_k)
+        elif use_dual_softmax:
             import scipy.special
             # Apply dual softmax scaled by temperature
             scaled_matrix = similarity_matrix / temperature
@@ -262,6 +278,28 @@ class VideoTextMatcher:
             similarity_matrix = prob_v_given_s * prob_s_given_v
             
         return similarity_matrix, all_metadata
+
+    @staticmethod
+    def _apply_csls_normalization(similarity_matrix: np.ndarray, k: int = 5) -> np.ndarray:
+        """
+        Apply Cross-domain Similarity Local Scaling (CSLS) to reduce hubness.
+
+        CSLS is label-free: it uses only the current query-video similarity
+        matrix to penalize clips or queries that are broadly similar to many
+        counterparts. This is useful for cross-modal retrieval where generic
+        clips can otherwise become assignment hubs.
+        """
+        matrix = np.asarray(similarity_matrix, dtype=np.float32)
+        if matrix.size == 0:
+            return matrix
+
+        row_k = max(1, min(int(k), matrix.shape[1]))
+        col_k = max(1, min(int(k), matrix.shape[0]))
+        row_neighbors = np.sort(matrix, axis=1)[:, -row_k:]
+        col_neighbors = np.sort(matrix, axis=0)[-col_k:, :]
+        row_density = row_neighbors.mean(axis=1, keepdims=True)
+        col_density = col_neighbors.mean(axis=0, keepdims=True)
+        return (2.0 * matrix) - row_density - col_density
     
     def match_segment_to_videos(
         self,
@@ -467,7 +505,9 @@ def create_sequence_optimal(
     match_only: bool = False,
     allow_reuse: bool = True,
     use_dual_softmax: bool = False,
-    dual_softmax_temp: float = 0.05
+    dual_softmax_temp: float = 0.05,
+    score_normalization: str = 'none',
+    csls_k: int = 5,
 ) -> List[ClipSelection]:
     """
     Create a sequence using the Hungarian Algorithm for optimal global matching.
@@ -508,6 +548,8 @@ def create_sequence_optimal(
         match_only,
         use_dual_softmax=use_dual_softmax,
         dual_softmax_temp=dual_softmax_temp,
+        score_normalization=score_normalization,
+        csls_k=csls_k,
     )
     
     if similarity_matrix.size == 0:
@@ -669,6 +711,8 @@ def create_sequence_optimal(
             "match_only": match_only,
             "use_dual_softmax": use_dual_softmax,
             "dual_softmax_temp": dual_softmax_temp,
+            "score_normalization": score_normalization,
+            "csls_k": csls_k,
         },
     }
 
@@ -728,6 +772,8 @@ def create_sequence_coherence_beam(
     normalize_scores: bool = True,
     use_dual_softmax: bool = False,
     dual_softmax_temp: float = 0.05,
+    score_normalization: str = 'none',
+    csls_k: int = 5,
 ) -> List[ClipSelection]:
     """Create a sequence using top-k beam search with neighboring clip coherence."""
     all_metadata = video_matcher.get_all_video_metadata()
@@ -751,6 +797,8 @@ def create_sequence_coherence_beam(
         match_only,
         use_dual_softmax=use_dual_softmax,
         dual_softmax_temp=dual_softmax_temp,
+        score_normalization=score_normalization,
+        csls_k=csls_k,
     )
     if similarity_matrix.size == 0:
         return []
@@ -772,6 +820,8 @@ def create_sequence_coherence_beam(
     diagnostics['params'].update({
         'use_dual_softmax': use_dual_softmax,
         'dual_softmax_temp': dual_softmax_temp,
+        'score_normalization': score_normalization,
+        'csls_k': csls_k,
     })
 
     if not selected_ids:
@@ -970,6 +1020,8 @@ def create_sequence(
     normalize_scores: bool = True,
     use_dual_softmax: bool = False,
     dual_softmax_temp: float = 0.05,
+    score_normalization: str = 'none',
+    csls_k: int = 5,
 ) -> List[ClipSelection]:
     """
     Create a sequence of video clips matched to script segments.
@@ -997,6 +1049,8 @@ def create_sequence(
             normalize_scores=normalize_scores,
             use_dual_softmax=use_dual_softmax,
             dual_softmax_temp=dual_softmax_temp,
+            score_normalization=score_normalization,
+            csls_k=csls_k,
         )
     if use_optimal:
         return create_sequence_optimal(
@@ -1006,6 +1060,8 @@ def create_sequence(
             allow_reuse,
             use_dual_softmax=use_dual_softmax,
             dual_softmax_temp=dual_softmax_temp,
+            score_normalization=score_normalization,
+            csls_k=csls_k,
         )
     else:
         return create_sequence_greedy(
