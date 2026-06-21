@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 from validate_videoprism_improvements import (
     attach_baseline_comparison,
     load_baseline_result,
+    load_best_result,
     write_summary,
 )
 
@@ -37,6 +38,39 @@ def write_result(path, exact):
             }
         )
     )
+
+
+def test_load_best_result_uses_exact_match_not_file_order(tmp_path):
+    result_path = tmp_path / "videoprism_grid_search_results.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "exact_match_accuracy": 40.0,
+                        "top_3_accuracy": 50.0,
+                        "top_5_accuracy": 60.0,
+                        "mrr": 0.4,
+                        "config": {"score_normalization": "none"},
+                    },
+                    {
+                        "exact_match_accuracy": 64.0,
+                        "top_3_accuracy": 70.0,
+                        "top_5_accuracy": 80.0,
+                        "mrr": 0.7,
+                        "config": {"score_normalization": "csls", "csls_k": 3},
+                    },
+                ],
+                "total_configs_tested": 2,
+            }
+        )
+    )
+
+    best = load_best_result(result_path)
+
+    assert best["exact_match_accuracy"] == 64.0
+    assert best["config"]["score_normalization"] == "csls"
 
 
 def test_validation_summary_reports_baseline_delta(tmp_path):

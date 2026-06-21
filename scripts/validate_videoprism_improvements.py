@@ -44,7 +44,13 @@ def load_best_result(path: Path) -> Dict[str, Any]:
     results = data.get("results") or []
     if not results:
         raise RuntimeError(f"No results found in {path}")
-    best = results[0]
+    best = max(
+        results,
+        key=lambda item: (
+            float(item.get("exact_match_accuracy") or 0.0),
+            float(item.get("mrr") or 0.0),
+        ),
+    )
     return {
         "path": str(path),
         "exact_match_accuracy": best.get("exact_match_accuracy"),
