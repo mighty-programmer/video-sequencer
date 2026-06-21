@@ -879,18 +879,49 @@ def _grid_search_result_paths(output_dir: str, benchmark: Any, retrieval_mode: s
     output_path = Path(_resolve_path(output_dir) or output_dir)
     mode = str(retrieval_mode or "writeavideo").lower()
     if mode == "openclip":
-        filenames = ["openclip/grid_search_results.json"]
+        filenames = ["openclip/grid_search_results.json", "grid_search_results.json"]
+        recursive_name = "grid_search_results.json"
     elif mode == "videoprism":
-        filenames = ["videoprism/videoprism_grid_search_results.json"]
+        filenames = ["videoprism/videoprism_grid_search_results.json", "videoprism_grid_search_results.json"]
+        recursive_name = "videoprism_grid_search_results.json"
     else:
-        filenames = ["wav/wav_grid_search_results.json"]
+        filenames = ["wav/wav_grid_search_results.json", "wav_grid_search_results.json"]
+        recursive_name = "wav_grid_search_results.json"
 
     roots = [
         output_path / f"benchmark_{benchmark_id}",
         output_path / f"comparison_b{benchmark_id}",
         output_path / "comparison_multi" / f"benchmark_{benchmark_id}",
     ]
-    return [root / filename for root in roots for filename in filenames]
+    candidates: List[Path] = [root / filename for root in roots for filename in filenames]
+
+    # Backward compatibility for older Web UI/manual runs that wrote directly
+    # under output/ or ad-hoc benchmark folders instead of the canonical path.
+    if output_path.exists():
+        benchmark_tokens = {f"benchmark_{benchmark_id}", f"b{benchmark_id}", f"video_{benchmark_id}"}
+        for path in output_path.rglob(recursive_name):
+            parts = {part.lower() for part in path.parts}
+            if any(token in parts or token in path.name.lower() or token in str(path.parent).lower() for token in benchmark_tokens):
+                candidates.append(path)
+
+    seen = set()
+    unique: List[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _grid_search_output_dir(output_dir: str, benchmark: Any, retrieval_mode: str) -> str:
+    benchmark_id = _normalize_benchmark_id(benchmark)
+    mode = "writeavideo" if retrieval_mode in {"write-a-video", "wav"} else str(retrieval_mode or "writeavideo").lower()
+    mode_dir = "wav" if mode == "writeavideo" else mode
+    output_path = Path(_resolve_path(output_dir) or output_dir)
+    if not benchmark_id:
+        return str(output_path / mode_dir)
+    return str(output_path / f"benchmark_{benchmark_id}" / mode_dir)
 
 
 def _prompt_settings_for_grid_config(retrieval_mode: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -936,6 +967,198 @@ def load_best_grid_search_config(output_dir: str, benchmark: Any, retrieval_mode
     }
 
 
+GRID_ANALYSIS_FILES = {
+    "grid_search_results.json": "openclip",
+    "videoprism_grid_search_results.json": "videoprism",
+    "wav_grid_search_results.json": "writeavideo",
+}
+
+GRID_ANALYSIS_CONFIG_KEYS = [
+    "model_name",
+    "num_frames",
+    "resolution",
+    "use_dual_softmax",
+    "aggregation",
+    "prompt_mode",
+    "assignment_method",
+    "query_mode",
+    "top_k",
+    "beam_size",
+    "lambda_coherence",
+    "candidate_pool_size",
+    "keyword_weight",
+    "enable_object_detection",
+    "enable_face_detection",
+]
+
+
+def _infer_benchmark_from_grid_payload(path: Path, payload: Dict[str, Any]) -> Optional[str]:
+    values = [
+        str(path),
+        str(path.parent),
+        str(payload.get("video_dir") or ""),
+        str(payload.get("segments_file") or ""),
+        str(payload.get("ground_truth_file") or ""),
+    ]
+    patterns = [
+        r"benchmark[_-](\d+)",
+        r"video[_-](\d+)",
+        r"voiceover[_-](\d+)",
+        r"(?:^|[/_\-])b(\d+)(?:$|[/_\-])",
+    ]
+    for value in values:
+        lowered = value.lower()
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _grid_analysis_mode(path: Path, payload: Dict[str, Any]) -> str:
+    if path.name in GRID_ANALYSIS_FILES:
+        return GRID_ANALYSIS_FILES[path.name]
+    if payload.get("encoder") == "videoprism":
+        return "videoprism"
+    if payload.get("matching") == "wav":
+        return "writeavideo"
+    if "videoprism" in str(path).lower():
+        return "videoprism"
+    if "wav" in str(path).lower():
+        return "writeavideo"
+    return "openclip"
+
+
+def _grid_analysis_float(value: Any, fallback: float = -1.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _grid_analysis_config_summary(config: Dict[str, Any]) -> str:
+    parts = []
+    for key in GRID_ANALYSIS_CONFIG_KEYS:
+        value = config.get(key)
+        if value in (None, "", []):
+            continue
+        label = key.replace("_", " ")
+        parts.append(f"{label}: {value}")
+    return " · ".join(parts) if parts else "No config metadata"
+
+
+def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]:
+    benchmark_id = _normalize_benchmark_id(benchmark)
+    output_path = Path(_resolve_path(output_dir) or output_dir)
+    rows: List[Dict[str, Any]] = []
+    sources: List[Dict[str, Any]] = []
+    seen_paths = set()
+
+    if not benchmark_id or not output_path.exists():
+        return {
+            "benchmark": benchmark_id,
+            "output_dir": str(output_path),
+            "sources": [],
+            "rows": [],
+            "best_by_pipeline": [],
+            "best_overall": None,
+            "pipeline_counts": {},
+            "message": "No output directory or benchmark was found.",
+        }
+
+    result_paths: List[Path] = []
+    for filename in GRID_ANALYSIS_FILES:
+        result_paths.extend(output_path.rglob(filename))
+    for path in output_path.rglob("*_videoprism_coherence_beam_results.json"):
+        # VideoPrism writes this companion file as a convenience copy when
+        # coherence_beam is present. Avoid double-counting if the canonical
+        # result JSON exists beside it.
+        if not (path.parent / "videoprism_grid_search_results.json").exists():
+            result_paths.append(path)
+
+    for path in sorted(result_paths):
+        key = str(path)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        try:
+            payload = _read_json(path, {})
+        except Exception as exc:
+            logger.warning("Could not read grid-search analysis file %s: %s", path, exc)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        inferred_benchmark = _infer_benchmark_from_grid_payload(path, payload)
+        if inferred_benchmark != benchmark_id:
+            continue
+        results = payload.get("results")
+        if not isinstance(results, list) or not results:
+            continue
+
+        retrieval_mode = _grid_analysis_mode(path, payload)
+        source_label = _safe_relpath(path, PROJECT_ROOT)
+        valid_results = [item for item in results if isinstance(item, dict)]
+        best = max(valid_results, key=lambda item: _grid_analysis_float(item.get("exact_match_accuracy")), default=None)
+        source_info = {
+            "source_file": str(path),
+            "source_label": source_label,
+            "retrieval_mode": retrieval_mode,
+            "timestamp": payload.get("timestamp"),
+            "total_configs_tested": payload.get("total_configs_tested") or len(valid_results),
+            "total_time_seconds": payload.get("total_time_seconds"),
+            "video_dir": payload.get("video_dir"),
+            "best_exact_match_accuracy": best.get("exact_match_accuracy") if best else None,
+            "best_top_5_accuracy": best.get("top_5_accuracy") if best else None,
+            "best_mrr": best.get("mrr") if best else None,
+            "best_config": copy.deepcopy(best.get("config", {})) if best else {},
+        }
+        sources.append(source_info)
+
+        for index, item in enumerate(valid_results):
+            config = copy.deepcopy(item.get("config", {})) if isinstance(item.get("config"), dict) else {}
+            rows.append({
+                "benchmark": benchmark_id,
+                "retrieval_mode": retrieval_mode,
+                "source_file": str(path),
+                "source_label": source_label,
+                "source_index": index,
+                "timestamp": payload.get("timestamp"),
+                "exact_match_accuracy": item.get("exact_match_accuracy"),
+                "top_3_accuracy": item.get("top_3_accuracy"),
+                "top_5_accuracy": item.get("top_5_accuracy"),
+                "mrr": item.get("mrr"),
+                "avg_similarity": item.get("avg_similarity"),
+                "indexing_time": item.get("indexing_time"),
+                "matching_time": item.get("matching_time"),
+                "total_time": item.get("total_time"),
+                "config": config,
+                "config_summary": _grid_analysis_config_summary(config),
+            })
+
+    rows.sort(key=lambda item: _grid_analysis_float(item.get("exact_match_accuracy")), reverse=True)
+    for index, row in enumerate(rows, 1):
+        row["rank"] = index
+
+    best_by_pipeline = []
+    pipeline_counts: Dict[str, int] = {}
+    for mode in sorted({row["retrieval_mode"] for row in rows}):
+        mode_rows = [row for row in rows if row["retrieval_mode"] == mode]
+        pipeline_counts[mode] = len(mode_rows)
+        if mode_rows:
+            best_by_pipeline.append(copy.deepcopy(mode_rows[0]))
+
+    return {
+        "benchmark": benchmark_id,
+        "output_dir": str(output_path),
+        "sources": sorted(sources, key=lambda item: (item.get("retrieval_mode") or "", item.get("source_label") or "")),
+        "rows": rows,
+        "best_by_pipeline": best_by_pipeline,
+        "best_overall": copy.deepcopy(rows[0]) if rows else None,
+        "pipeline_counts": pipeline_counts,
+        "message": None if rows else "No saved grid-search results were found for this benchmark.",
+    }
+
+
 def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any], retrieval_mode: str) -> Dict[str, Any]:
     grid_config = copy.deepcopy(best.get("config", {}))
     mode = best.get("retrieval_mode") or retrieval_mode
@@ -960,6 +1183,12 @@ def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any],
         ("beam_size", "coherence_beam_size"),
         ("lambda_coherence", "lambda_coherence"),
         ("normalize_scores", "normalize_coherence_scores"),
+        ("query_mode", "query_mode"),
+        ("context_window_size", "context_window_size"),
+        ("query_llm_model", "query_llm_model"),
+        ("use_query_cache", "use_query_cache"),
+        ("force_refresh_expansions", "force_refresh_expansions"),
+        ("disable_llm_expansion", "disable_llm_expansion"),
     ]:
         if source_key in grid_config:
             config[target_key] = grid_config[source_key]
@@ -1080,13 +1309,15 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         return ("Full Pipeline", command)
 
     if action == "openclip-grid-search":
-        resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
+        benchmark = str(payload["benchmark"])
+        resolved = resolve_benchmark_paths(benchmark, benchmarks_dir)
+        grid_output_dir = _grid_search_output_dir(output_dir, benchmark, "openclip")
         command = [
             sys.executable, "-u", "src/grid_search.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--ground-truth", resolved["ground_truth"],
-            "--output", output_dir,
+            "--output", grid_output_dir,
             "--device", gpu_device,
         ]
         command.extend(["--models"] + payload.get("models", ["ViT-B-32", "ViT-B-16", "ViT-L-14"]))
@@ -1103,13 +1334,15 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         return ("OpenCLIP Grid Search", command)
 
     if action == "videoprism-grid-search":
-        resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
+        benchmark = str(payload["benchmark"])
+        resolved = resolve_benchmark_paths(benchmark, benchmarks_dir)
+        grid_output_dir = _grid_search_output_dir(output_dir, benchmark, "videoprism")
         command = [
             sys.executable, "-u", "src/videoprism_grid_search.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--ground-truth", resolved["ground_truth"],
-            "--output", output_dir,
+            "--output", grid_output_dir,
             "--device", gpu_device,
         ]
         command.extend(["--models"] + payload.get("models", ["videoprism_lvt_public_v1_base", "videoprism_lvt_public_v1_large"]))
@@ -1150,13 +1383,15 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
         return ("VideoPrism Grid Search", command)
 
     if action == "write-a-video-grid-search":
-        resolved = resolve_benchmark_paths(str(payload["benchmark"]), benchmarks_dir)
+        benchmark = str(payload["benchmark"])
+        resolved = resolve_benchmark_paths(benchmark, benchmarks_dir)
+        grid_output_dir = _grid_search_output_dir(output_dir, benchmark, "writeavideo")
         command = [
             sys.executable, "-u", "src/wav_grid_search.py",
             "--video-dir", resolved["video_dir"],
             "--segments", resolved["segments"],
             "--ground-truth", resolved["ground_truth"],
-            "--output", output_dir,
+            "--output", grid_output_dir,
             "--device", gpu_device,
             "--yolo-model", payload.get("yolo_model", "yolov8n"),
             "--fps", str(payload.get("fps", 1.0)),

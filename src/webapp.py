@@ -27,6 +27,7 @@ from web_backend import (
     editor_manager,
     job_manager,
     load_best_grid_search_config,
+    load_grid_search_analysis,
     server_control_manager,
     settings_store,
 )
@@ -147,6 +148,12 @@ def clear_cache(request: DictPayload) -> Dict[str, Any]:
 def get_benchmarks() -> List[Dict[str, Any]]:
     settings = settings_store.load()
     return benchmark_manager.list(settings.get("benchmarks_dir", "./data/benchmarks"))
+
+
+@app.get("/api/benchmarks/{benchmark_number}/analysis")
+def get_benchmark_analysis(benchmark_number: str) -> Dict[str, Any]:
+    settings = settings_store.load()
+    return load_grid_search_analysis(settings.get("output", "./output"), benchmark_number)
 
 
 @app.delete("/api/benchmarks/{benchmark_number}")

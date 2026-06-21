@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Sequencer Studio</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260608-ops-controls" />
+    <link rel="stylesheet" href="/static/app.css?v=20260621-benchmark-analysis" />
   </head>
   <body>
     <div class="shell">
@@ -533,7 +533,7 @@
         </section>
 
         <section class="tab-panel" id="tab-benchmarks">
-          <div class="two-column">
+          <div class="two-column" id="benchmarkManagementPanel">
             <div class="card">
               <div class="section-label">Upload Benchmark</div>
               <div class="stack compact">
@@ -552,6 +552,30 @@
               <div class="section-label">Benchmarks</div>
               <div id="benchmarkList" class="stack"></div>
             </div>
+          </div>
+
+          <div class="card analysis-card hidden" id="benchmarkAnalysisPanel">
+            <div class="analysis-header">
+              <div>
+                <div class="section-label">Benchmark Analysis</div>
+                <h2 id="benchmarkAnalysisTitle">Grid Search Comparison</h2>
+                <p class="muted">Compare saved grid-search runs, best pipeline settings, and every tested configuration for the selected benchmark.</p>
+              </div>
+              <div class="analysis-controls">
+                <label>
+                  Benchmark
+                  <select id="analysisBenchmarkSelect"></select>
+                </label>
+                <div class="launch-actions">
+                  <button class="ghost" id="refreshBenchmarkAnalysis">Refresh Analysis</button>
+                  <button class="ghost" id="backToBenchmarks">Back to Benchmarks</button>
+                </div>
+              </div>
+            </div>
+            <div class="status" id="benchmarkAnalysisStatus"></div>
+            <div id="benchmarkAnalysisSummary" class="analysis-summary-grid"></div>
+            <div id="benchmarkAnalysisSources" class="analysis-sources"></div>
+            <div id="benchmarkAnalysisTable" class="analysis-table-wrap"></div>
           </div>
         </section>
 
@@ -614,6 +638,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260608-ops-controls" type="module"></script>
+    <script src="/static/app.js?v=20260621-benchmark-analysis" type="module"></script>
   </body>
 </html>

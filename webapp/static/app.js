@@ -5,6 +5,7 @@ const state = {
   cache: null,
   jobs: [],
   sessions: [],
+  benchmarkAnalysis: null,
   currentSession: null,
   bestGridSearch: null,
   activeSegmentId: null,
@@ -86,6 +87,38 @@ function shortText(text, max = 120) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatMetric(value, suffix = "") {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "n/a";
+  const rounded = Math.abs(parsed) >= 10 ? parsed.toFixed(2) : parsed.toFixed(3);
+  return `${rounded}${suffix}`;
+}
+
+function compactJson(value) {
+  try {
+    return JSON.stringify(value || {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
+function pipelineLabel(mode) {
+  const value = String(mode || "").toLowerCase();
+  if (value === "videoprism") return "VideoPrism";
+  if (value === "openclip") return "OpenCLIP";
+  if (value === "writeavideo" || value === "wav") return "Write-A-Video";
+  return mode || "Unknown";
+}
+
 function benchmarkOptionsHtml(includeCustom = false) {
   const options = state.benchmarks
     .map((benchmark) => `<option value="${benchmark.number}">Benchmark ${benchmark.number} · ${benchmark.title || benchmark.name}</option>`)
@@ -103,6 +136,7 @@ function syncBenchmarkSelects() {
     "openclipGridBenchmark",
     "videoprismGridBenchmark",
     "wavGridBenchmark",
+    "analysisBenchmarkSelect",
   ].forEach((id) => {
     const select = $(id);
     if (!select) return;
@@ -138,6 +172,7 @@ function renderBenchmarks() {
       </div>
       <div class="launch-actions">
         <button class="ghost" data-use-benchmark="${benchmark.number}">Use In Editor</button>
+        <button class="ghost" data-analyse-benchmark="${benchmark.number}">Analyse</button>
         <a class="ghost" href="/api/benchmarks/${benchmark.number}/download">Download</a>
         <button class="ghost" data-delete-benchmark="${benchmark.number}">Delete</button>
       </div>
@@ -152,6 +187,10 @@ function renderBenchmarks() {
     });
   });
 
+  container.querySelectorAll("[data-analyse-benchmark]").forEach((button) => {
+    button.addEventListener("click", () => openBenchmarkAnalysis(button.dataset.analyseBenchmark));
+  });
+
   container.querySelectorAll("[data-delete-benchmark]").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!confirm(`Delete benchmark ${button.dataset.deleteBenchmark}?`)) return;
@@ -163,6 +202,164 @@ function renderBenchmarks() {
       }
     });
   });
+}
+
+function showBenchmarkManagement() {
+  $("benchmarkManagementPanel")?.classList.remove("hidden");
+  $("benchmarkAnalysisPanel")?.classList.add("hidden");
+  setStatus("benchmarkAnalysisStatus", "");
+}
+
+async function openBenchmarkAnalysis(benchmarkNumber) {
+  const benchmark = String(benchmarkNumber || $("analysisBenchmarkSelect")?.value || "").trim();
+  if (!benchmark) {
+    setStatus("benchmarkAnalysisStatus", "Choose a benchmark to analyse.", true);
+    return;
+  }
+
+  switchTab("benchmarks");
+  $("benchmarkManagementPanel")?.classList.add("hidden");
+  $("benchmarkAnalysisPanel")?.classList.remove("hidden");
+  if ($("analysisBenchmarkSelect")) $("analysisBenchmarkSelect").value = benchmark;
+  state.benchmarkAnalysis = null;
+  renderBenchmarkAnalysis();
+  setStatus("benchmarkAnalysisStatus", `Loading Benchmark ${benchmark} grid-search stats...`);
+
+  try {
+    state.benchmarkAnalysis = await api(`/api/benchmarks/${encodeURIComponent(benchmark)}/analysis`);
+    renderBenchmarkAnalysis();
+    setStatus("benchmarkAnalysisStatus", state.benchmarkAnalysis.message || "Analysis loaded.");
+  } catch (error) {
+    setStatus("benchmarkAnalysisStatus", error.message, true);
+  }
+}
+
+function renderBenchmarkAnalysis() {
+  const analysis = state.benchmarkAnalysis;
+  const title = $("benchmarkAnalysisTitle");
+  const summary = $("benchmarkAnalysisSummary");
+  const sources = $("benchmarkAnalysisSources");
+  const table = $("benchmarkAnalysisTable");
+  if (!summary || !sources || !table) return;
+
+  const selectedBenchmark = $("analysisBenchmarkSelect")?.value || analysis?.benchmark || "";
+  if (title) title.textContent = selectedBenchmark ? `Benchmark ${selectedBenchmark} Grid Search Analysis` : "Grid Search Comparison";
+
+  if (!analysis) {
+    summary.innerHTML = `
+      <div class="analysis-empty">
+        Select a benchmark or click Analyse on a benchmark card to compare saved grid-search results.
+      </div>
+    `;
+    sources.innerHTML = "";
+    table.innerHTML = "";
+    return;
+  }
+
+  const rows = analysis.rows || [];
+  const bestRows = analysis.best_by_pipeline || [];
+  const bestOverall = analysis.best_overall;
+  const sourceRows = analysis.sources || [];
+  const pipelineCounts = analysis.pipeline_counts || {};
+
+  if (!rows.length) {
+    summary.innerHTML = `<div class="analysis-empty">${escapeHtml(analysis.message || "No saved grid-search results found.")}</div>`;
+    sources.innerHTML = "";
+    table.innerHTML = "";
+    return;
+  }
+
+  summary.innerHTML = `
+    <div class="analysis-stat overview">
+      <span>Total Configurations</span>
+      <strong>${rows.length}</strong>
+      <small>${sourceRows.length} saved run files · ${Object.keys(pipelineCounts).length} pipelines</small>
+    </div>
+    ${bestOverall ? `
+      <div class="analysis-stat best-overall">
+        <span>Best Overall</span>
+        <strong>${pipelineLabel(bestOverall.retrieval_mode)} · ${formatMetric(bestOverall.exact_match_accuracy, "%")}</strong>
+        <div class="metric-bar"><i style="width: ${Math.max(0, Math.min(100, Number(bestOverall.exact_match_accuracy) || 0))}%"></i></div>
+        <small>Top-5 ${formatMetric(bestOverall.top_5_accuracy, "%")} · MRR ${formatMetric(bestOverall.mrr)} · Avg sim ${formatMetric(bestOverall.avg_similarity)}</small>
+        <small>${escapeHtml(shortText(bestOverall.config_summary, 190))}</small>
+      </div>
+    ` : ""}
+    ${bestRows.map((row) => `
+      <div class="analysis-stat">
+        <span>${pipelineLabel(row.retrieval_mode)} · ${pipelineCounts[row.retrieval_mode] || 0} configs</span>
+        <strong>${formatMetric(row.exact_match_accuracy, "%")}</strong>
+        <div class="metric-bar"><i style="width: ${Math.max(0, Math.min(100, Number(row.exact_match_accuracy) || 0))}%"></i></div>
+        <small>Top-5 ${formatMetric(row.top_5_accuracy, "%")} · MRR ${formatMetric(row.mrr)}</small>
+        <small>${escapeHtml(shortText(row.config_summary, 160))}</small>
+      </div>
+    `).join("")}
+  `;
+
+  sources.innerHTML = `
+    <h3>Saved Runs Scanned</h3>
+    <div class="analysis-source-grid">
+      ${sourceRows.map((source) => `
+        <div class="analysis-source">
+          <div class="analysis-source-topline">
+            <strong>${pipelineLabel(source.retrieval_mode)}</strong>
+            <span>${formatMetric(source.best_exact_match_accuracy, "%")}</span>
+          </div>
+          <span>${escapeHtml(shortText(source.source_label, 120))}</span>
+          <span>${source.total_configs_tested || 0} configs · Top-5 ${formatMetric(source.best_top_5_accuracy, "%")} · MRR ${formatMetric(source.best_mrr)}</span>
+          <span>${escapeHtml(source.timestamp || "no timestamp")}</span>
+          <details>
+            <summary>Best config in this file</summary>
+            <pre>${escapeHtml(compactJson(source.best_config))}</pre>
+          </details>
+        </div>
+      `).join("")}
+    </div>
+  `;
+
+  const visibleRows = rows.slice(0, 300);
+  table.innerHTML = `
+    <div class="analysis-table-heading">
+      <h3>Ranked Configurations</h3>
+      <span class="muted">Showing ${visibleRows.length} of ${rows.length} saved configurations, ranked by Exact Match.</span>
+    </div>
+    <table class="analysis-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Pipeline</th>
+          <th>Exact</th>
+          <th>Top-3</th>
+          <th>Top-5</th>
+          <th>MRR</th>
+          <th>Avg Sim</th>
+          <th>Time</th>
+          <th>Source</th>
+          <th>Configuration</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${visibleRows.map((row) => `
+          <tr>
+            <td>${row.rank}</td>
+            <td><span class="pipeline-pill ${escapeHtml(row.retrieval_mode)}">${pipelineLabel(row.retrieval_mode)}</span></td>
+            <td><strong>${formatMetric(row.exact_match_accuracy, "%")}</strong></td>
+            <td>${formatMetric(row.top_3_accuracy, "%")}</td>
+            <td>${formatMetric(row.top_5_accuracy, "%")}</td>
+            <td>${formatMetric(row.mrr)}</td>
+            <td>${formatMetric(row.avg_similarity)}</td>
+            <td>${formatMetric(row.total_time, "s")}</td>
+            <td>${escapeHtml(shortText(row.source_label, 70))}</td>
+            <td>
+              <details class="config-details">
+                <summary>${escapeHtml(shortText(row.config_summary, 150))}</summary>
+                <pre>${escapeHtml(compactJson(row.config))}</pre>
+              </details>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 function renderCache() {
@@ -292,10 +489,11 @@ function renderBestGridConfig(source = state.bestGridSearch) {
     ["Dual softmax", config.use_dual_softmax],
   ].filter(([, value]) => value !== undefined && value !== null);
 
+  const hiddenAutoApplied = ["videoprism", "openclip", "writeavideo"].includes(String(source.retrieval_mode || "").toLowerCase());
   target.innerHTML = `
-    <strong>Best grid-search settings:</strong>
+    <strong>Best grid-search settings${hiddenAutoApplied ? " auto-applied" : ""}:</strong>
     <span>${fields.map(([label, value]) => `${label}: ${compactGridValue(value)}`).join(" · ")}</span>
-    <span class="muted">Exact match ${Number(source.exact_match_accuracy || 0).toFixed(2)}%${source.source_label ? ` · ${source.source_label}` : ""}</span>
+    <span class="muted">${hiddenAutoApplied ? "Hidden pipeline parameters such as VideoPrism model and resolution are inherited from this result. · " : ""}Exact match ${Number(source.exact_match_accuracy || 0).toFixed(2)}%${source.source_label ? ` · ${source.source_label}` : ""}</span>
   `;
 }
 
@@ -359,7 +557,7 @@ function updateSessionModeControls() {
   const canSegmentAudio = !hasManualSegments;
 
   setControlVisible("sessionOpenclipModelField", "sessionOpenclipModel", usesOpenclip);
-  setControlVisible("sessionVideoprismModelField", "sessionVideoprismModel", usesVideoprism);
+  setControlVisible("sessionVideoprismModelField", "sessionVideoprismModel", false);
   setControlVisible("sessionKeywordWeightField", "sessionKeywordWeight", usesKeywordIndex);
   setControlVisible("sessionObjectsField", "sessionObjects", usesKeywordIndex);
   setControlVisible("sessionFacesField", "sessionFaces", usesKeywordIndex);
@@ -652,27 +850,30 @@ async function refreshBootstrap() {
 async function createSession() {
   setStatus("editorStatus", "Creating session...");
   try {
+    const mode = $("sessionMode").value;
+    const bestGridMode = String(state.bestGridSearch?.retrieval_mode || "").toLowerCase();
+    const bestConfig = state.bestGridSearch && !state.bestGridSearch.missing && bestGridMode === mode ? state.bestGridSearch.config || {} : {};
     const payload = {
       name: $("sessionName").value.trim(),
       benchmark: $("sessionBenchmark").value || null,
-      retrieval_mode: $("sessionMode").value,
+      retrieval_mode: mode,
       openclip_model: $("sessionOpenclipModel").value,
-      videoprism_model: $("sessionVideoprismModel").value,
+      videoprism_model: mode === "videoprism" && bestConfig.model_name ? bestConfig.model_name : undefined,
       video_dir: $("sessionVideoDir").value.trim(),
       audio: $("sessionAudio").value.trim(),
       segments: $("sessionSegments").value.trim(),
       candidate_pool_size: asNumber($("sessionPool").value, 10),
       keyword_weight: asNumber($("sessionKeywordWeight").value, 0.2),
       simple_segmentation: $("sessionSimpleSegmentation").checked,
-      enable_object_detection: $("sessionMode").value === "writeavideo" && $("sessionObjects").checked,
-      enable_face_detection: $("sessionMode").value === "writeavideo" && $("sessionFaces").checked,
+      enable_object_detection: mode === "writeavideo" && $("sessionObjects").checked,
+      enable_face_detection: mode === "writeavideo" && $("sessionFaces").checked,
       exact_matching_mode: $("sessionExactMatching")?.checked || false,
-      assignment_method: $("sessionMode").value === "videoprism" ? $("sessionAssignmentMethod").value : "hungarian",
+      assignment_method: mode === "videoprism" ? $("sessionAssignmentMethod").value : "hungarian",
       coherence_top_k: asNumber($("sessionCoherenceTopK")?.value, 5),
       coherence_beam_size: asNumber($("sessionCoherenceBeam")?.value, 10),
       lambda_coherence: asNumber($("sessionLambda")?.value, 0.1),
       normalize_coherence_scores: $("sessionNormalizeScores")?.checked ?? true,
-      query_mode: $("sessionMode").value === "videoprism" ? ($("sessionQueryMode")?.value || "original") : "original",
+      query_mode: mode === "videoprism" ? ($("sessionQueryMode")?.value || "original") : "original",
       context_window_size: asNumber($("sessionContextWindow")?.value, 1),
       query_llm_model: $("sessionQueryLLM")?.value.trim() || null,
       use_query_cache: $("sessionUseQueryCache")?.checked ?? true,
@@ -1097,6 +1298,9 @@ function bindEvents() {
   $("moveSegmentUp").addEventListener("click", () => moveSegment("up"));
   $("moveSegmentDown").addEventListener("click", () => moveSegment("down"));
   $("uploadBenchmarkButton").addEventListener("click", uploadBenchmark);
+  $("refreshBenchmarkAnalysis")?.addEventListener("click", () => openBenchmarkAnalysis($("analysisBenchmarkSelect")?.value));
+  $("backToBenchmarks")?.addEventListener("click", showBenchmarkManagement);
+  $("analysisBenchmarkSelect")?.addEventListener("change", () => openBenchmarkAnalysis($("analysisBenchmarkSelect").value));
   $("saveSettings").addEventListener("click", saveSettings);
   $("refreshServerStatus").addEventListener("click", refreshServerStatusOnly);
   $("refreshJobs")?.addEventListener("click", refreshJobsOnly);
