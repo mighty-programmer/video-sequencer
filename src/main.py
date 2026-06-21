@@ -665,6 +665,8 @@ class VideoSequencingPipeline:
                 beam_size=coherence_beam_size,
                 lambda_coherence=lambda_coherence,
                 normalize_scores=normalize_coherence_scores,
+                use_dual_softmax=use_dual_softmax,
+                dual_softmax_temp=dual_softmax_temp,
             )
             
             if not clip_selections:

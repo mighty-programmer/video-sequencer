@@ -13,6 +13,7 @@ video and text embeddings are in the same embedding space.
 """
 
 import logging
+import inspect
 from typing import List, Dict, Tuple, Optional, Set, Any
 from dataclasses import dataclass, asdict
 import numpy as np
@@ -38,6 +39,23 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def _compute_assignment_similarity_matrix(
+    video_matcher,
+    script_segments: List[Dict],
+    match_only: bool,
+    use_dual_softmax: bool = False,
+    dual_softmax_temp: float = 0.05,
+) -> Tuple[np.ndarray, List]:
+    """Compute the assignment matrix while respecting matcher-specific kwargs."""
+    matrix_kwargs = {"match_only": match_only}
+    matrix_signature = inspect.signature(video_matcher.compute_similarity_matrix)
+    if "use_dual_softmax" in matrix_signature.parameters:
+        matrix_kwargs["use_dual_softmax"] = use_dual_softmax
+    if "temperature" in matrix_signature.parameters:
+        matrix_kwargs["temperature"] = dual_softmax_temp
+    return video_matcher.compute_similarity_matrix(script_segments, **matrix_kwargs)
 
 
 @dataclass
@@ -447,7 +465,9 @@ def create_sequence_optimal(
     script_segments: List[Dict],
     video_matcher: VideoTextMatcher,
     match_only: bool = False,
-    allow_reuse: bool = True
+    allow_reuse: bool = True,
+    use_dual_softmax: bool = False,
+    dual_softmax_temp: float = 0.05
 ) -> List[ClipSelection]:
     """
     Create a sequence using the Hungarian Algorithm for optimal global matching.
@@ -482,8 +502,12 @@ def create_sequence_optimal(
     logger.info("=" * 60)
     
     # Compute full similarity matrix
-    similarity_matrix, all_metadata = video_matcher.compute_similarity_matrix(
-        script_segments, match_only=match_only
+    similarity_matrix, all_metadata = _compute_assignment_similarity_matrix(
+        video_matcher,
+        script_segments,
+        match_only,
+        use_dual_softmax=use_dual_softmax,
+        dual_softmax_temp=dual_softmax_temp,
     )
     
     if similarity_matrix.size == 0:
@@ -535,6 +559,8 @@ def create_sequence_optimal(
     else:
         # No reuse allowed: Use Hungarian Algorithm for optimal assignment
         logger.info(f"No reuse: Using Hungarian Algorithm for optimal {num_segments}x{num_videos} assignment")
+        if use_dual_softmax:
+            logger.info("Using Dual Softmax-normalized similarity matrix for assignment (temperature=%.4f)", dual_softmax_temp)
         
         if num_segments > num_videos:
             logger.warning(f"More segments ({num_segments}) than videos ({num_videos}). "
@@ -638,7 +664,12 @@ def create_sequence_optimal(
         "combined_score": semantic_total,
         "selected_clip_ids": [selection.video_id for selection in sequence],
         "transition_diagnostics": [],
-        "params": {"allow_reuse": allow_reuse, "match_only": match_only},
+        "params": {
+            "allow_reuse": allow_reuse,
+            "match_only": match_only,
+            "use_dual_softmax": use_dual_softmax,
+            "dual_softmax_temp": dual_softmax_temp,
+        },
     }
 
     # Calculate start/end times in the final sequence
@@ -695,6 +726,8 @@ def create_sequence_coherence_beam(
     beam_size: int = 10,
     lambda_coherence: float = 0.1,
     normalize_scores: bool = True,
+    use_dual_softmax: bool = False,
+    dual_softmax_temp: float = 0.05,
 ) -> List[ClipSelection]:
     """Create a sequence using top-k beam search with neighboring clip coherence."""
     all_metadata = video_matcher.get_all_video_metadata()
@@ -712,9 +745,12 @@ def create_sequence_coherence_beam(
         top_k, beam_size, lambda_coherence, normalize_scores, allow_reuse,
     )
 
-    similarity_matrix, all_metadata = video_matcher.compute_similarity_matrix(
+    similarity_matrix, all_metadata = _compute_assignment_similarity_matrix(
+        video_matcher,
         script_segments,
-        match_only=match_only,
+        match_only,
+        use_dual_softmax=use_dual_softmax,
+        dual_softmax_temp=dual_softmax_temp,
     )
     if similarity_matrix.size == 0:
         return []
@@ -732,6 +768,11 @@ def create_sequence_coherence_beam(
         normalize_scores=normalize_scores,
     )
     video_matcher.last_assignment_diagnostics = diagnostics
+    diagnostics.setdefault('params', {})
+    diagnostics['params'].update({
+        'use_dual_softmax': use_dual_softmax,
+        'dual_softmax_temp': dual_softmax_temp,
+    })
 
     if not selected_ids:
         logger.error("Coherence beam search produced no selections")
@@ -927,6 +968,8 @@ def create_sequence(
     beam_size: int = 10,
     lambda_coherence: float = 0.1,
     normalize_scores: bool = True,
+    use_dual_softmax: bool = False,
+    dual_softmax_temp: float = 0.05,
 ) -> List[ClipSelection]:
     """
     Create a sequence of video clips matched to script segments.
@@ -952,10 +995,17 @@ def create_sequence(
             beam_size=beam_size,
             lambda_coherence=lambda_coherence,
             normalize_scores=normalize_scores,
+            use_dual_softmax=use_dual_softmax,
+            dual_softmax_temp=dual_softmax_temp,
         )
     if use_optimal:
         return create_sequence_optimal(
-            script_segments, video_matcher, match_only, allow_reuse
+            script_segments,
+            video_matcher,
+            match_only,
+            allow_reuse,
+            use_dual_softmax=use_dual_softmax,
+            dual_softmax_temp=dual_softmax_temp,
         )
     else:
         return create_sequence_greedy(

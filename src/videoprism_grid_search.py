@@ -468,6 +468,7 @@ class VideoPrismGridSearch:
                 beam_size=config.beam_size,
                 lambda_coherence=config.lambda_coherence,
                 normalize_scores=config.normalize_scores,
+                use_dual_softmax=config.use_dual_softmax,
             )
             assignment_metadata = getattr(matcher, 'last_assignment_diagnostics', None) or {
                 'assignment_method': config.assignment_method,
