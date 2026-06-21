@@ -57,6 +57,42 @@ def load_best_result(path: Path) -> Dict[str, Any]:
     }
 
 
+def load_baseline_result(repo_root: Path, baseline_root: str, benchmark: str) -> Dict[str, Any] | None:
+    path = (
+        repo_root
+        / baseline_root
+        / f"benchmark_{benchmark}"
+        / "videoprism"
+        / "videoprism_grid_search_results.json"
+    )
+    if not path.exists():
+        return None
+    return load_best_result(path)
+
+
+def attach_baseline_comparison(summary: Dict[str, Any]) -> None:
+    improved = 0
+    comparable = 0
+    for result in summary["benchmarks"].values():
+        baseline = result.get("baseline")
+        if not baseline:
+            continue
+        comparable += 1
+        exact = float(result.get("exact_match_accuracy") or 0.0)
+        baseline_exact = float(baseline.get("exact_match_accuracy") or 0.0)
+        delta = round(exact - baseline_exact, 4)
+        result["baseline_exact_match_accuracy"] = baseline_exact
+        result["exact_match_delta"] = delta
+        result["improved_over_baseline"] = delta > 0
+        if delta > 0:
+            improved += 1
+    summary["comparison"] = {
+        "comparable_benchmarks": comparable,
+        "improved_benchmarks": improved,
+        "all_comparable_improved": comparable > 0 and improved == comparable,
+    }
+
+
 def write_summary(run_dir: Path, summary: Dict[str, Any]) -> None:
     json_path = run_dir / "summary.json"
     json_path.write_text(json.dumps(summary, indent=2))
@@ -67,11 +103,14 @@ def write_summary(run_dir: Path, summary: Dict[str, Any]) -> None:
         f"Run directory: `{run_dir}`",
         f"Timestamp: `{summary['timestamp']}`",
         "",
-        "| Benchmark | Best Exact | Top-3 | MRR | Config |",
-        "| --- | ---: | ---: | ---: | --- |",
+        "| Benchmark | Baseline Exact | New Best Exact | Delta | Improved? | Top-3 | MRR | Config |",
+        "| --- | ---: | ---: | ---: | --- | ---: | ---: | --- |",
     ]
     for bm, result in summary["benchmarks"].items():
         cfg = result["config"]
+        baseline_exact = result.get("baseline_exact_match_accuracy")
+        delta = result.get("exact_match_delta")
+        improved = result.get("improved_over_baseline")
         config_label = (
             f"{cfg.get('model_name')} | {cfg.get('num_frames')}f | "
             f"{cfg.get('resolution')}p | dual={cfg.get('use_dual_softmax')} | "
@@ -79,11 +118,19 @@ def write_summary(run_dir: Path, summary: Dict[str, Any]) -> None:
             f"csls_k={cfg.get('csls_k', 5)}"
         )
         lines.append(
-            f"| {bm} | {result['exact_match_accuracy']} | "
+            f"| {bm} | {baseline_exact if baseline_exact is not None else 'n/a'} | "
+            f"{result['exact_match_accuracy']} | {delta if delta is not None else 'n/a'} | "
+            f"{'yes' if improved else 'no' if improved is not None else 'n/a'} | "
             f"{result['top_3_accuracy']} | {result['mrr']} | `{config_label}` |"
         )
     lines.append("")
     lines.append("Each benchmark tests: raw Hungarian, Dual Softmax Hungarian, and CSLS Hungarian.")
+    comparison = summary.get("comparison", {})
+    if comparison:
+        lines.append(
+            f"Comparable benchmarks improved: {comparison.get('improved_benchmarks', 0)}/"
+            f"{comparison.get('comparable_benchmarks', 0)}."
+        )
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
@@ -91,6 +138,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate VideoPrism assignment improvements on hard benchmarks.")
     parser.add_argument("--benchmarks", nargs="+", default=sorted(DEFAULT_CASES), help="Benchmark numbers to run")
     parser.add_argument("--output-root", default="output/videoprism_improvement_validation")
+    parser.add_argument(
+        "--baseline-root",
+        default="output",
+        help="Root containing the backed-up/current fast-sweep aggregate result files",
+    )
     parser.add_argument("--cache-dir", default="./cache/videoprism_improvement_validation")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--csls-k", nargs="+", type=int, default=[1, 3, 5])
@@ -152,8 +204,15 @@ def main() -> int:
 
         run_command(command, cwd=repo_root)
         result_path = output_dir / "videoprism_grid_search_results.json"
-        summary["benchmarks"][benchmark] = load_best_result(result_path)
+        result = load_best_result(result_path)
+        baseline = load_baseline_result(repo_root, args.baseline_root, benchmark)
+        if baseline:
+            result["baseline"] = baseline
+        else:
+            result["baseline_missing"] = True
+        summary["benchmarks"][benchmark] = result
 
+    attach_baseline_comparison(summary)
     write_summary(run_dir, summary)
     print(f"\nValidation summary written to {run_dir / 'summary.md'}")
     return 0
