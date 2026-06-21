@@ -130,7 +130,11 @@ def write_summary(run_dir: Path, summary: Dict[str, Any]) -> None:
             f"{result['top_3_accuracy']} | {result['mrr']} | `{config_label}` |"
         )
     lines.append("")
-    lines.append("Each benchmark tests: raw Hungarian, Dual Softmax Hungarian, and CSLS Hungarian.")
+    normalizers = summary.get("score_normalizations") or ["none", "csls"]
+    lines.append(
+        "Each benchmark tests Hungarian assignment with score normalizers: "
+        f"{', '.join(normalizers)}, plus Dual Softmax for the raw-score baseline."
+    )
     comparison = summary.get("comparison", {})
     if comparison:
         lines.append(
@@ -171,6 +175,7 @@ def main() -> int:
     summary: Dict[str, Any] = {
         "timestamp": timestamp,
         "run_dir": str(run_dir),
+        "score_normalizations": list(args.score_normalizations),
         "benchmarks": {},
     }
 
