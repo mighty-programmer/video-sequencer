@@ -151,6 +151,13 @@ def main() -> int:
     )
     parser.add_argument("--cache-dir", default="./cache/videoprism_improvement_validation")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--score-normalizations",
+        nargs="+",
+        default=["none", "csls", "rank_fusion", "zscore"],
+        choices=["none", "csls", "rank_fusion", "zscore"],
+        help="Label-free matrix normalizers to test",
+    )
     parser.add_argument("--csls-k", nargs="+", type=int, default=[1, 3, 5])
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--keep-windowing", action="store_true", help="Keep temporal windowing enabled")
@@ -194,8 +201,7 @@ def main() -> int:
             "false",
             "true",
             "--score-normalizations",
-            "none",
-            "csls",
+            *args.score_normalizations,
             "--csls-k",
             *[str(item) for item in args.csls_k],
             "--prompt-modes",

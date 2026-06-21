@@ -103,3 +103,45 @@ def test_csls_normalization_penalizes_broad_hubs_without_labels():
     )
 
     np.testing.assert_allclose(normalized, expected, atol=1e-6)
+
+
+def test_rank_fusion_normalization_uses_mutual_ranks():
+    matrix = np.array(
+        [
+            [0.90, 0.80, 0.10],
+            [0.85, 0.20, 0.05],
+        ],
+        dtype=np.float32,
+    )
+
+    normalized = VideoTextMatcher._apply_rank_fusion_normalization(matrix)
+    expected = np.array(
+        [
+            [2.0, 1.5, 1.0 / 3.0 + 1.0],
+            [1.5, 1.0, 1.0 / 3.0 + 0.5],
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_allclose(normalized, expected, atol=1e-6)
+
+
+def test_zscore_normalization_combines_row_and_column_standardization():
+    matrix = np.array(
+        [
+            [1.0, 2.0],
+            [3.0, 4.0],
+        ],
+        dtype=np.float32,
+    )
+
+    normalized = VideoTextMatcher._apply_zscore_normalization(matrix)
+    expected = np.array(
+        [
+            [-1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_allclose(normalized, expected, atol=1e-6)

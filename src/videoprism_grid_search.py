@@ -299,6 +299,9 @@ class VideoPrismGridSearch:
             if score_normalization == 'none' and int(csls_k) != baseline_csls_k:
                 # CSLS k has no effect without CSLS, so avoid duplicate baselines.
                 continue
+            if score_normalization not in {'none', 'csls'} and int(csls_k) != baseline_csls_k:
+                # Rank/z-score normalizers do not use CSLS k, so avoid duplicate runs.
+                continue
             beam_param_product = [(5, 10, 0.0)]
             if assignment_method == 'coherence_beam':
                 beam_param_product = itertools.product(coherence_top_k_list, coherence_beam_size_list, lambda_coherence_list)
@@ -939,7 +942,7 @@ Examples:
     parser.add_argument('--no-normalize-coherence-scores', action='store_false', dest='normalize_coherence_scores', default=True,
                        help='Disable score normalization for coherence beam search')
     parser.add_argument('--score-normalizations', nargs='+', default=None,
-                       choices=['none', 'csls'],
+                       choices=['none', 'csls', 'rank_fusion', 'zscore'],
                        help='Label-free similarity matrix normalizers to test before assignment')
     parser.add_argument('--csls-k', nargs='+', type=int, default=None,
                        help='Neighbor counts for CSLS hubness correction')

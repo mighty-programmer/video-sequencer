@@ -999,7 +999,7 @@ Examples:
     parser.add_argument(
         '--score-normalization',
         default='none',
-        choices=['none', 'csls'],
+        choices=['none', 'csls', 'rank_fusion', 'zscore'],
         help='Label-free similarity matrix normalization before assignment (default: none)'
     )
     parser.add_argument(

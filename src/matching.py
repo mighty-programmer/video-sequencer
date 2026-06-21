@@ -201,7 +201,8 @@ class VideoTextMatcher:
             match_only: If True, use only raw cosine similarity
             use_dual_softmax: If True, applies dual softmax scaling over the matrix
             temperature: Temperature scaling factor for the softmax
-            score_normalization: Optional label-free post-processing ('none' or 'csls')
+            score_normalization: Optional label-free post-processing
+                ('none', 'csls', 'rank_fusion', or 'zscore')
             csls_k: Number of nearest neighbors used by CSLS hubness correction
             
         Returns:
@@ -261,11 +262,15 @@ class VideoTextMatcher:
                     similarity_matrix[seg_idx, vid_idx] = combined_score
         
         normalization = (score_normalization or 'none').lower()
-        if normalization not in {'none', 'csls'}:
+        if normalization not in {'none', 'csls', 'rank_fusion', 'zscore'}:
             raise ValueError(f"Unsupported score_normalization: {score_normalization}")
 
         if normalization == 'csls':
             similarity_matrix = self._apply_csls_normalization(similarity_matrix, k=csls_k)
+        elif normalization == 'rank_fusion':
+            similarity_matrix = self._apply_rank_fusion_normalization(similarity_matrix)
+        elif normalization == 'zscore':
+            similarity_matrix = self._apply_zscore_normalization(similarity_matrix)
         elif use_dual_softmax:
             import scipy.special
             # Apply dual softmax scaled by temperature
@@ -300,6 +305,50 @@ class VideoTextMatcher:
         row_density = row_neighbors.mean(axis=1, keepdims=True)
         col_density = col_neighbors.mean(axis=0, keepdims=True)
         return (2.0 * matrix) - row_density - col_density
+
+    @staticmethod
+    def _apply_rank_fusion_normalization(similarity_matrix: np.ndarray) -> np.ndarray:
+        """
+        Convert raw scores into mutual reciprocal-rank scores.
+
+        This is label-free and scale-invariant: a segment/clip pair scores well
+        when the clip ranks highly for the segment and the segment ranks highly
+        for the clip. It is useful when embedding score magnitudes are not
+        calibrated across queries.
+        """
+        matrix = np.asarray(similarity_matrix, dtype=np.float32)
+        if matrix.size == 0:
+            return matrix
+
+        row_order = np.argsort(-matrix, axis=1)
+        row_ranks = np.empty(row_order.shape, dtype=np.float32)
+        row_values = np.arange(1, matrix.shape[1] + 1, dtype=np.float32)[None, :]
+        np.put_along_axis(row_ranks, row_order, row_values, axis=1)
+
+        col_order = np.argsort(-matrix, axis=0)
+        col_ranks = np.empty(col_order.shape, dtype=np.float32)
+        col_values = np.arange(1, matrix.shape[0] + 1, dtype=np.float32)[:, None]
+        np.put_along_axis(col_ranks, col_order, col_values, axis=0)
+
+        return (1.0 / row_ranks) + (1.0 / col_ranks)
+
+    @staticmethod
+    def _apply_zscore_normalization(similarity_matrix: np.ndarray) -> np.ndarray:
+        """
+        Standardize scores by both query and clip neighborhoods.
+
+        The returned matrix favors pairs that are unusually strong for a
+        segment and unusually strong for a clip, without using labels.
+        """
+        matrix = np.asarray(similarity_matrix, dtype=np.float32)
+        if matrix.size == 0:
+            return matrix
+
+        row_std = np.maximum(matrix.std(axis=1, keepdims=True), 1e-8)
+        col_std = np.maximum(matrix.std(axis=0, keepdims=True), 1e-8)
+        row_z = (matrix - matrix.mean(axis=1, keepdims=True)) / row_std
+        col_z = (matrix - matrix.mean(axis=0, keepdims=True)) / col_std
+        return 0.5 * (row_z + col_z)
     
     def match_segment_to_videos(
         self,

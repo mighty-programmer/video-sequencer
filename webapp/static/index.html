@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Sequencer Studio</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260621-videoprism-csls" />
+    <link rel="stylesheet" href="/static/app.css?v=20260621-videoprism-normalizers" />
   </head>
   <body>
     <div class="shell">
@@ -420,9 +420,11 @@
                   </select>
                 </label>
                 <label>Score Normalization
-                  <select id="videoprismGridScoreNormalizations" multiple size="2">
+                  <select id="videoprismGridScoreNormalizations" multiple size="4">
                     <option value="none" selected>None</option>
                     <option value="csls">CSLS hubness correction</option>
+                    <option value="rank_fusion">Mutual rank fusion</option>
+                    <option value="zscore">Row/column z-score</option>
                   </select>
                 </label>
                 <div class="dynamic-panel" data-pipeline-show="videoprism-csls">
@@ -658,6 +660,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260621-videoprism-csls" type="module"></script>
+    <script src="/static/app.js?v=20260621-videoprism-normalizers" type="module"></script>
   </body>
 </html>
