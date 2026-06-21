@@ -1066,14 +1066,18 @@ function updatePipelineControls() {
 
   const vpAssignments = selectedValues("videoprismGridAssignments");
   const vpQueryModes = selectedValues("videoprismGridQueryModes");
+  const vpScoreNormalizations = selectedValues("videoprismGridScoreNormalizations");
   const usesCoherence = vpAssignments.includes("coherence_beam");
+  const usesCsls = vpScoreNormalizations.includes("csls");
   const usesContext = vpQueryModes.some((mode) => ["context_window", "hybrid_llm"].includes(mode));
   const usesLlmQuery = vpQueryModes.some((mode) => ["llm_expanded", "hybrid_llm"].includes(mode));
 
   setPipelineVisible("videoprism-coherence", usesCoherence);
+  setPipelineVisible("videoprism-csls", usesCsls);
   setPipelineVisible("videoprism-context", usesContext);
   setPipelineVisible("videoprism-llm-query", usesLlmQuery);
   ["videoprismGridTopK", "videoprismGridBeams", "videoprismGridLambdas", "videoprismGridNormalizeCoherence"].forEach((id) => setSelectEnabled(id, usesCoherence));
+  setSelectEnabled("videoprismGridCslsK", usesCsls);
   setSelectEnabled("videoprismGridContextWindows", usesContext);
   setSelectEnabled("videoprismGridQueryLLM", usesLlmQuery);
   setSelectEnabled("videoprismGridUseQueryCache", usesLlmQuery);
@@ -1084,6 +1088,7 @@ function bindPipelineControls() {
     "quickEncoder",
     "fullBenchmark",
     "videoprismGridAssignments",
+    "videoprismGridScoreNormalizations",
     "videoprismGridQueryModes",
   ].forEach((id) => {
     const element = $(id);
@@ -1095,7 +1100,9 @@ async function submitJob(action) {
   updatePipelineControls();
   const vpAssignments = selectedValues("videoprismGridAssignments");
   const vpQueryModes = selectedValues("videoprismGridQueryModes");
+  const vpScoreNormalizations = selectedValues("videoprismGridScoreNormalizations");
   const usesVpCoherence = vpAssignments.includes("coherence_beam");
+  const usesVpCsls = vpScoreNormalizations.includes("csls");
   const usesVpContext = vpQueryModes.some((mode) => ["context_window", "hybrid_llm"].includes(mode));
   const usesVpLlmQuery = vpQueryModes.some((mode) => ["llm_expanded", "hybrid_llm"].includes(mode));
 
@@ -1132,6 +1139,8 @@ async function submitJob(action) {
       resolutions: selectedValues("videoprismGridResolutions"),
       dual_softmax: selectedValues("videoprismGridDualSM"),
       assignment_methods: vpAssignments,
+      score_normalizations: vpScoreNormalizations,
+      csls_k: usesVpCsls ? selectedValues("videoprismGridCslsK") : [],
       coherence_top_k: usesVpCoherence ? selectedValues("videoprismGridTopK") : [],
       coherence_beam_sizes: usesVpCoherence ? selectedValues("videoprismGridBeams") : [],
       lambda_coherence_values: usesVpCoherence ? selectedValues("videoprismGridLambdas") : [],

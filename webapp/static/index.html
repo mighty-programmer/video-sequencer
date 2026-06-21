@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Sequencer Studio</title>
-    <link rel="stylesheet" href="/static/app.css?v=20260621-grid-progress" />
+    <link rel="stylesheet" href="/static/app.css?v=20260621-videoprism-csls" />
   </head>
   <body>
     <div class="shell">
@@ -419,6 +419,25 @@
                     <option value="coherence_beam">Coherence Beam</option>
                   </select>
                 </label>
+                <label>Score Normalization
+                  <select id="videoprismGridScoreNormalizations" multiple size="2">
+                    <option value="none" selected>None</option>
+                    <option value="csls">CSLS hubness correction</option>
+                  </select>
+                </label>
+                <div class="dynamic-panel" data-pipeline-show="videoprism-csls">
+                  <div class="panel-note">
+                    CSLS is label-free and penalizes clips that behave like generic cross-modal retrieval hubs.
+                    It is tested as an alternative to Dual Softmax, not together with it.
+                  </div>
+                  <label>CSLS k
+                    <select id="videoprismGridCslsK" multiple size="3">
+                      <option value="1" selected>1</option>
+                      <option value="3" selected>3</option>
+                      <option value="5" selected>5</option>
+                    </select>
+                  </label>
+                </div>
                 <div class="dynamic-panel" data-pipeline-show="videoprism-coherence">
                   <div class="panel-note">These controls are sent only when <strong>Coherence Beam</strong> is selected.</div>
                   <div class="pipeline-subgrid">
@@ -639,6 +658,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260621-grid-progress" type="module"></script>
+    <script src="/static/app.js?v=20260621-videoprism-csls" type="module"></script>
   </body>
 </html>
