@@ -265,7 +265,8 @@ def main():
                 "--frames", "8", "16",
                 "--resolutions", "288", "396",
                 "--dual-softmax", "true", "false",
-                "--prompt-modes", "none",
+                "--prompt-modes", "none", "template:video", "template:photo",
+                "template:scene", "template:cooking", "ensemble:template",
                 "--query-modes", "original",
                 "--assignment-methods", "hungarian",
             ])
