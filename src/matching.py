@@ -1156,10 +1156,18 @@ class PromptedVideoTextMatcher(VideoTextMatcher):
         )
         self.prompt_template = prompt_template
 
-    def get_text_embedding(self, text: str) -> np.ndarray:
+    def _apply_prompt_template(self, text: str) -> str:
         if self.prompt_template:
-            text = self.prompt_template.format(text)
-        return super().get_text_embedding(text)
+            return self.prompt_template.format(text)
+        return text
+
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        prompted_text = self._apply_prompt_template(text)
+        return super().get_text_embeddings_batch([prompted_text])[0]
+
+    def get_text_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        prompted_texts = [self._apply_prompt_template(text) for text in texts]
+        return super().get_text_embeddings_batch(prompted_texts)
 
 
 class EnsembleVideoTextMatcher(VideoTextMatcher):
@@ -1186,14 +1194,34 @@ class EnsembleVideoTextMatcher(VideoTextMatcher):
         )
         self.ensemble_templates = ensemble_templates or DEFAULT_VIDEOPRISM_ENSEMBLE_TEMPLATES
 
+    @staticmethod
+    def _normalize_embedding(embedding: np.ndarray) -> np.ndarray:
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding.astype(np.float32)
+
     def get_text_embedding(self, text: str) -> np.ndarray:
         prompts = [t.format(text) for t in self.ensemble_templates]
         all_embeddings = super().get_text_embeddings_batch(prompts)
         avg = np.mean(all_embeddings, axis=0)
-        norm = np.linalg.norm(avg)
-        if norm > 0:
-            avg = avg / norm
-        return avg.astype(np.float32)
+        return self._normalize_embedding(avg)
+
+    def get_text_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.array([], dtype=np.float32)
+
+        prompts_per_text = [
+            [template.format(text) for template in self.ensemble_templates]
+            for text in texts
+        ]
+        flat_prompts = [prompt for prompts in prompts_per_text for prompt in prompts]
+        all_embeddings = super().get_text_embeddings_batch(flat_prompts)
+        grouped = all_embeddings.reshape(len(texts), len(self.ensemble_templates), -1)
+        averaged = np.mean(grouped, axis=1)
+        norms = np.linalg.norm(averaged, axis=1, keepdims=True)
+        averaged = averaged / np.maximum(norms, 1e-8)
+        return averaged.astype(np.float32)
 
 
 class LLMEnsembleVideoTextMatcher(VideoTextMatcher):
@@ -1230,7 +1258,7 @@ class LLMEnsembleVideoTextMatcher(VideoTextMatcher):
         prompts = self.llm_prompts.get(text, [text])
         
         if len(prompts) <= 1:
-            return super().get_text_embedding(text)
+            return super().get_text_embeddings_batch([text])[0]
         
         # Use batch encoding for all LLM prompts at once
         all_embeddings = super().get_text_embeddings_batch(prompts)
@@ -1240,3 +1268,9 @@ class LLMEnsembleVideoTextMatcher(VideoTextMatcher):
         if norm > 0:
             avg_embedding = avg_embedding / norm
         return avg_embedding.astype(np.float32)
+
+    def get_text_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        embeddings = [self.get_text_embedding(text) for text in texts]
+        if not embeddings:
+            return np.array([], dtype=np.float32)
+        return np.stack(embeddings).astype(np.float32)
