@@ -11,6 +11,7 @@ const state = {
   activeSegmentId: null,
   selectedJobId: null,
   movementPreference: "auto",
+  hybridAgentic: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -108,6 +109,7 @@ function formatDuration(seconds) {
 }
 
 function formatMetric(value, suffix = "") {
+  if (value === null || value === undefined || value === "") return "n/a";
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return "n/a";
   const rounded = Math.abs(parsed) >= 10 ? parsed.toFixed(2) : parsed.toFixed(3);
@@ -122,9 +124,29 @@ function compactJson(value) {
   }
 }
 
+function mediaLink(path, label) {
+  if (!path) return "";
+  return `<a href="/api/media?path=${encodeURIComponent(path)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+}
+
+function hybridAgentMeta(row) {
+  if (String(row?.retrieval_mode || "").toLowerCase() !== "hybrid_agentic") return '<span class="muted">Baseline</span>';
+  const config = row.config || {};
+  const runtime = config.agent_runtime || row.agent_mode || "unknown";
+  const mode = row.agent_mode || config.agent_decision_mode || "agentic";
+  const reviewed = row.reviewed_segments ?? config.agent_max_segments ?? "n/a";
+  const logLink = mediaLink(row.log_file, "Open log");
+  return `
+    <div><strong>${escapeHtml(runtime)}</strong></div>
+    <div class="muted">${escapeHtml(mode)} · reviewed ${escapeHtml(String(reviewed))}</div>
+    ${logLink ? `<div>${logLink}</div>` : ""}
+  `;
+}
+
 function pipelineLabel(mode) {
   const value = String(mode || "").toLowerCase();
   if (value === "videoprism") return "VideoPrism";
+  if (value === "hybrid_agentic" || value === "agentic_videoprism") return "Hybrid Agentic VideoPrism";
   if (value === "openclip") return "OpenCLIP";
   if (value === "writeavideo" || value === "wav") return "Write-A-Video";
   return mode || "Unknown";
@@ -146,6 +168,7 @@ function syncBenchmarkSelects() {
     "fullBenchmark",
     "openclipGridBenchmark",
     "videoprismGridBenchmark",
+    "hybridGridBenchmark",
     "wavGridBenchmark",
     "analysisBenchmarkSelect",
   ].forEach((id) => {
@@ -288,11 +311,12 @@ function renderBenchmarkAnalysis() {
     </div>
     ${bestOverall ? `
       <div class="analysis-stat best-overall">
-        <span>Best Overall</span>
+        <span>Post-hoc Validation Leader</span>
         <strong>${pipelineLabel(bestOverall.retrieval_mode)} · ${formatMetric(bestOverall.exact_match_accuracy, "%")}</strong>
         <div class="metric-bar"><i style="width: ${Math.max(0, Math.min(100, Number(bestOverall.exact_match_accuracy) || 0))}%"></i></div>
         <small>Top-5 ${formatMetric(bestOverall.top_5_accuracy, "%")} · MRR ${formatMetric(bestOverall.mrr)} · Avg sim ${formatMetric(bestOverall.avg_similarity)}</small>
         <small>${escapeHtml(shortText(bestOverall.config_summary, 190))}</small>
+        <small>Ground truth ranks completed validation configurations only; it never selects or replaces an output inside a run.</small>
       </div>
     ` : ""}
     ${bestRows.map((row) => `
@@ -301,6 +325,7 @@ function renderBenchmarkAnalysis() {
         <strong>${formatMetric(row.exact_match_accuracy, "%")}</strong>
         <div class="metric-bar"><i style="width: ${Math.max(0, Math.min(100, Number(row.exact_match_accuracy) || 0))}%"></i></div>
         <small>Top-5 ${formatMetric(row.top_5_accuracy, "%")} · MRR ${formatMetric(row.mrr)}</small>
+        ${row.retrieval_mode === "hybrid_agentic" ? `<small>Same-config baseline ${formatMetric(row.baseline_exact_match_accuracy, "%")} · agent delta ${formatMetric(row.exact_match_delta, " pp")}</small><small>Agent ${escapeHtml(row.agent_mode || row.config?.agent_runtime || "unknown")} · reviewed ${escapeHtml(String(row.reviewed_segments ?? "n/a"))}${row.log_file ? ` · ${mediaLink(row.log_file, "decision log")}` : ""}</small>` : ""}
         <small>${escapeHtml(shortText(row.config_summary, 160))}</small>
       </div>
     `).join("")}
@@ -317,9 +342,10 @@ function renderBenchmarkAnalysis() {
           </div>
           <span>${escapeHtml(shortText(source.source_label, 120))}</span>
           <span>${source.total_configs_tested || 0} configs · Top-5 ${formatMetric(source.best_top_5_accuracy, "%")} · MRR ${formatMetric(source.best_mrr)}</span>
+          ${source.retrieval_mode === "hybrid_agentic" ? `<span>Same-config baseline ${formatMetric(source.best_baseline_exact_match_accuracy, "%")} · agent delta ${formatMetric(source.best_exact_match_delta, " pp")}</span><span>Agent ${escapeHtml(source.best_agent_mode || "unknown")} · reviewed ${escapeHtml(String(source.best_reviewed_segments ?? "n/a"))}${source.best_log_file ? ` · ${mediaLink(source.best_log_file, "validation-leader log")}` : ""}</span>` : ""}
           <span>${escapeHtml(source.timestamp || "no timestamp")}</span>
           <details>
-            <summary>Best config in this file</summary>
+            <summary>Post-hoc validation leader in this file</summary>
             <pre>${escapeHtml(compactJson(source.best_config))}</pre>
           </details>
         </div>
@@ -330,8 +356,8 @@ function renderBenchmarkAnalysis() {
   const visibleRows = rows.slice(0, 300);
   table.innerHTML = `
     <div class="analysis-table-heading">
-      <h3>Ranked Configurations</h3>
-      <span class="muted">Showing ${visibleRows.length} of ${rows.length} saved configurations, ranked by Exact Match.</span>
+      <h3>Post-hoc Validation Ranking</h3>
+      <span class="muted">Showing ${visibleRows.length} of ${rows.length} completed configurations, ranked after prediction by Exact Match. Ground truth never substitutes an output.</span>
     </div>
     <table class="analysis-table">
       <thead>
@@ -339,12 +365,15 @@ function renderBenchmarkAnalysis() {
           <th>#</th>
           <th>Pipeline</th>
           <th>Exact</th>
+          <th>Baseline</th>
+          <th>Delta</th>
           <th>Top-3</th>
           <th>Top-5</th>
           <th>MRR</th>
           <th>Avg Sim</th>
           <th>Time</th>
           <th>Source</th>
+          <th>Agent / Log</th>
           <th>Configuration</th>
         </tr>
       </thead>
@@ -354,12 +383,15 @@ function renderBenchmarkAnalysis() {
             <td>${row.rank}</td>
             <td><span class="pipeline-pill ${escapeHtml(row.retrieval_mode)}">${pipelineLabel(row.retrieval_mode)}</span></td>
             <td><strong>${formatMetric(row.exact_match_accuracy, "%")}</strong></td>
+            <td>${row.retrieval_mode === "hybrid_agentic" ? formatMetric(row.baseline_exact_match_accuracy, "%") : "—"}</td>
+            <td>${row.retrieval_mode === "hybrid_agentic" ? formatMetric(row.exact_match_delta, " pp") : "—"}</td>
             <td>${formatMetric(row.top_3_accuracy, "%")}</td>
             <td>${formatMetric(row.top_5_accuracy, "%")}</td>
             <td>${formatMetric(row.mrr)}</td>
             <td>${formatMetric(row.avg_similarity)}</td>
             <td>${formatMetric(row.total_time, "s")}</td>
             <td>${escapeHtml(shortText(row.source_label, 70))}</td>
+            <td>${hybridAgentMeta(row)}</td>
             <td>
               <details class="config-details">
                 <summary>${escapeHtml(shortText(row.config_summary, 150))}</summary>
@@ -513,16 +545,27 @@ function renderBestGridConfig(source = state.bestGridSearch) {
     ["Model", config.model_name],
     ["Frames", config.num_frames],
     ["Aggregation", config.aggregation],
-    ["Prompt", config.prompt_mode || source.prompt_mode],
+    ["Baseline prompt", config.baseline_prompt_mode || config.prompt_mode || source.prompt_mode],
+    ["Agent search prompt", config.agent_search_prompt_mode],
     ["Pool", config.candidate_pool_size],
     ["Keyword", config.keyword_weight],
     ["Objects", config.enable_object_detection],
     ["Faces", config.enable_face_detection],
     ["Resolution", config.resolution],
     ["Dual softmax", config.use_dual_softmax],
+    ["Agent mode", config.agent_decision_mode],
+    ["Agent shortlist", config.agent_shortlist_size],
+    ["Agent margin", config.agent_ambiguity_margin_threshold],
+    ["Agent review scope", config.agent_review_scope],
+    ["Reviewed segments", config.agent_review_scope === "all" ? "all" : config.agent_max_segments],
+    ["Searches / segment", config.agent_search_budget_per_segment],
+    ["Codex model", config.agent_codex_model],
+    ["Codex reasoning", config.agent_codex_reasoning_effort],
+    ["Independent component critic", config.agent_verify_assignment_cycles],
+    ["Agent runtime", config.agent_runtime],
   ].filter(([, value]) => value !== undefined && value !== null);
 
-  const hiddenAutoApplied = ["videoprism", "openclip", "writeavideo"].includes(String(source.retrieval_mode || "").toLowerCase());
+  const hiddenAutoApplied = ["videoprism", "openclip", "writeavideo", "hybrid_agentic"].includes(String(source.retrieval_mode || "").toLowerCase());
   target.innerHTML = `
     <strong>Best grid-search settings${hiddenAutoApplied ? " auto-applied" : ""}:</strong>
     <span>${fields.map(([label, value]) => `${label}: ${compactGridValue(value)}`).join(" · ")}</span>
@@ -577,7 +620,8 @@ function setControlVisible(fieldId, inputId, visible) {
 function updateSessionModeControls() {
   const mode = $("sessionMode")?.value || "writeavideo";
   const usesOpenclip = mode === "openclip" || mode === "writeavideo";
-  const usesVideoprism = mode === "videoprism";
+  const usesHybridAgentic = mode === "hybrid_agentic";
+  const usesVideoprismQueryControls = mode === "videoprism";
   const usesKeywordIndex = mode === "writeavideo";
   const usesCoherenceAssignment = mode === "videoprism";
   const selectedAssignment = $("sessionAssignmentMethod")?.value || "hungarian";
@@ -585,9 +629,48 @@ function updateSessionModeControls() {
   const selectedQueryMode = $("sessionQueryMode")?.value || "original";
   const usesContextQuery = selectedQueryMode !== "original";
   const usesLLMQuery = selectedQueryMode === "llm_expanded" || selectedQueryMode === "hybrid_llm";
+  const usesCodex = usesHybridAgentic && ($("sessionAgentUseCodex")?.checked || false);
+  const usesFullAgentAudit = ($("sessionAgentReviewScope")?.value || "all") === "all";
+  const usesCycleCritic = usesCodex && usesFullAgentAudit && ($("sessionAgentCycleCritic")?.checked ?? true);
+  const sessionDecisionMode = $("sessionAgentDecisionMode");
+  if (sessionDecisionMode?.value === "hard_lock" && !usesCodex) sessionDecisionMode.value = "advisory";
+  Array.from(sessionDecisionMode?.options || []).forEach((option) => {
+    if (option.value === "hard_lock") option.disabled = !usesCodex;
+  });
+  const sessionUsesHardConstraints = (sessionDecisionMode?.value || "advisory") === "hard_lock";
+  const sessionContactSheets = $("sessionAgentContactSheets");
+  if (sessionContactSheets) {
+    if (sessionUsesHardConstraints || usesCycleCritic) sessionContactSheets.checked = true;
+    sessionContactSheets.disabled = sessionUsesHardConstraints || usesCycleCritic;
+    sessionContactSheets.title = sessionUsesHardConstraints
+      ? "Direct visual inspection is required before a hard constraint can be applied."
+      : usesCycleCritic
+        ? "The independent assignment-component critic requires sampled-frame evidence."
+      : "Allow Codex to inspect sampled frames from anonymous candidates.";
+  }
+  syncCodexRuntimeControls("sessionAgentCodexModel", "sessionAgentCodexReasoning");
   const selectedBenchmark = state.benchmarks.find((benchmark) => benchmark.number === $("sessionBenchmark")?.value);
   const hasManualSegments = Boolean($("sessionSegments")?.value.trim()) || Boolean(selectedBenchmark?.has_segments);
   const canSegmentAudio = !hasManualSegments;
+  const exactMatching = $("sessionExactMatching");
+  if (exactMatching) {
+    if (usesHybridAgentic) {
+      if (!exactMatching.checked) exactMatching.dataset.hybridForced = "true";
+      exactMatching.checked = true;
+    } else if (exactMatching.dataset.hybridForced === "true") {
+      exactMatching.checked = false;
+      delete exactMatching.dataset.hybridForced;
+    }
+    exactMatching.disabled = usesHybridAgentic;
+    exactMatching.title = usesHybridAgentic
+      ? "Hybrid Agentic mode always uses global one-to-one Hungarian assignment."
+      : "Use global one-to-one assignment across all segments.";
+  }
+  const agentContractNote = $("sessionAgentContractNote");
+  if (agentContractNote) {
+    agentContractNote.hidden = !usesHybridAgentic;
+    agentContractNote.classList.toggle("hidden", !usesHybridAgentic);
+  }
 
   setControlVisible("sessionOpenclipModelField", "sessionOpenclipModel", usesOpenclip);
   setControlVisible("sessionVideoprismModelField", "sessionVideoprismModel", false);
@@ -603,11 +686,24 @@ function updateSessionModeControls() {
   setControlVisible("sessionCoherenceBeamField", "sessionCoherenceBeam", usesCoherenceBeam);
   setControlVisible("sessionLambdaField", "sessionLambda", usesCoherenceBeam);
   setControlVisible("sessionNormalizeScoresField", "sessionNormalizeScores", usesCoherenceBeam);
-  setControlVisible("sessionQueryModeField", "sessionQueryMode", usesVideoprism);
-  setControlVisible("sessionContextWindowField", "sessionContextWindow", usesVideoprism && usesContextQuery);
-  setControlVisible("sessionQueryLLMField", "sessionQueryLLM", usesVideoprism && usesLLMQuery);
-  setControlVisible("sessionUseQueryCacheField", "sessionUseQueryCache", usesVideoprism && usesLLMQuery);
-  setControlVisible("sessionForceRefreshExpansionsField", "sessionForceRefreshExpansions", usesVideoprism && usesLLMQuery);
+  setControlVisible("sessionQueryModeField", "sessionQueryMode", usesVideoprismQueryControls);
+  setControlVisible("sessionContextWindowField", "sessionContextWindow", usesVideoprismQueryControls && usesContextQuery);
+  setControlVisible("sessionQueryLLMField", "sessionQueryLLM", usesVideoprismQueryControls && usesLLMQuery);
+  setControlVisible("sessionUseQueryCacheField", "sessionUseQueryCache", usesVideoprismQueryControls && usesLLMQuery);
+  setControlVisible("sessionForceRefreshExpansionsField", "sessionForceRefreshExpansions", usesVideoprismQueryControls && usesLLMQuery);
+  // Accuracy-affecting agent parameters are inherited from the best saved
+  // hybrid grid result, just like the hidden VideoPrism model and resolution.
+  setControlVisible("sessionAgentDecisionModeField", "sessionAgentDecisionMode", false);
+  setControlVisible("sessionAgentReviewScopeField", "sessionAgentReviewScope", false);
+  setControlVisible("sessionAgentShortlistField", "sessionAgentShortlist", false);
+  setControlVisible("sessionAgentMarginField", "sessionAgentMargin", false);
+  setControlVisible("sessionAgentMaxSegmentsField", "sessionAgentMaxSegments", false);
+  setControlVisible("sessionAgentSearchBudgetField", "sessionAgentSearchBudget", false);
+  setControlVisible("sessionAgentContactSheetsField", "sessionAgentContactSheets", usesHybridAgentic);
+  setControlVisible("sessionAgentUseCodexField", "sessionAgentUseCodex", usesHybridAgentic);
+  setControlVisible("sessionAgentCycleCriticField", "sessionAgentCycleCritic", usesCodex && usesFullAgentAudit);
+  setControlVisible("sessionAgentCodexModelField", "sessionAgentCodexModel", usesCodex);
+  setControlVisible("sessionAgentCodexReasoningField", "sessionAgentCodexReasoning", usesCodex);
 }
 
 function renderSessions() {
@@ -871,6 +967,8 @@ async function refreshBootstrap() {
   state.cache = payload.cache;
   state.jobs = payload.jobs;
   state.sessions = payload.sessions;
+  state.hybridAgentic = payload.hybrid_agentic || null;
+  syncHybridOptionContract();
 
   renderSettings();
   renderServerStatus();
@@ -884,6 +982,9 @@ async function createSession() {
   setStatus("editorStatus", "Creating session...");
   try {
     const mode = $("sessionMode").value;
+    if (mode === "hybrid_agentic" && $("sessionAgentUseCodex")?.checked && !state.hybridAgentic?.codex?.ready) {
+      throw new Error("Codex MCP is selected, but Codex CLI is not authenticated and ready.");
+    }
     const bestGridMode = String(state.bestGridSearch?.retrieval_mode || "").toLowerCase();
     const bestConfig = state.bestGridSearch && !state.bestGridSearch.missing && bestGridMode === mode ? state.bestGridSearch.config || {} : {};
     const payload = {
@@ -891,7 +992,7 @@ async function createSession() {
       benchmark: $("sessionBenchmark").value || null,
       retrieval_mode: mode,
       openclip_model: $("sessionOpenclipModel").value,
-      videoprism_model: mode === "videoprism" && bestConfig.model_name ? bestConfig.model_name : undefined,
+      videoprism_model: (mode === "videoprism" || mode === "hybrid_agentic") && bestConfig.model_name ? bestConfig.model_name : undefined,
       video_dir: $("sessionVideoDir").value.trim(),
       audio: $("sessionAudio").value.trim(),
       segments: $("sessionSegments").value.trim(),
@@ -902,6 +1003,18 @@ async function createSession() {
       enable_face_detection: mode === "writeavideo" && $("sessionFaces").checked,
       exact_matching_mode: $("sessionExactMatching")?.checked || false,
       assignment_method: mode === "videoprism" ? $("sessionAssignmentMethod").value : "hungarian",
+      agent_enabled: mode === "hybrid_agentic",
+      agent_decision_mode: $("sessionAgentDecisionMode")?.value || "advisory",
+      agent_review_scope: $("sessionAgentReviewScope")?.value || "all",
+      agent_shortlist_size: asNumber($("sessionAgentShortlist")?.value, 5),
+      agent_ambiguity_margin_threshold: asNumber($("sessionAgentMargin")?.value, 0.05),
+      agent_max_segments: asNumber($("sessionAgentMaxSegments")?.value, 5),
+      agent_search_budget_per_segment: asNumber($("sessionAgentSearchBudget")?.value, 2),
+      agent_allow_contact_sheet: $("sessionAgentContactSheets")?.checked ?? true,
+      agent_verify_assignment_cycles: mode === "hybrid_agentic" && ($("sessionAgentCycleCritic")?.checked ?? true),
+      use_codex: mode === "hybrid_agentic" && ($("sessionAgentUseCodex")?.checked || false),
+      codex_model: $("sessionAgentCodexModel")?.value || "gpt-5.6-sol",
+      codex_reasoning_effort: $("sessionAgentCodexReasoning")?.value || "xhigh",
       coherence_top_k: asNumber($("sessionCoherenceTopK")?.value, 5),
       coherence_beam_size: asNumber($("sessionCoherenceBeam")?.value, 10),
       lambda_coherence: asNumber($("sessionLambda")?.value, 0.1),
@@ -1060,6 +1173,72 @@ function setSelectEnabled(id, enabled) {
   if (element) element.disabled = !enabled;
 }
 
+function populateHybridSelect(id, optionKey, selected) {
+  const element = $(id);
+  const options = state.hybridAgentic?.options?.[optionKey];
+  if (!element || !Array.isArray(options)) return;
+  const selectedValues = new Set((selected || []).map(String));
+  element.replaceChildren(...options.map((item) => {
+    const option = new Option(item.label, String(item.value));
+    option.selected = selectedValues.has(String(item.value));
+    return option;
+  }));
+}
+
+function syncCodexRuntimeControls(modelId, reasoningId) {
+  const modelSelect = $(modelId);
+  const reasoningSelect = $(reasoningId);
+  if (!modelSelect || !reasoningSelect) return;
+
+  const status = state.hybridAgentic?.codex || {};
+  const fallbackModels = state.hybridAgentic?.options?.codex_models || [];
+  const catalog = Array.isArray(status.models) && status.models.length ? status.models : fallbackModels;
+  const previousModel = modelSelect.value || status.default_model || "gpt-5.6-sol";
+  modelSelect.replaceChildren(...catalog.map((item) => new Option(item.label, String(item.value))));
+  modelSelect.value = catalog.some((item) => String(item.value) === previousModel)
+    ? previousModel
+    : String(status.default_model || catalog[0]?.value || "gpt-5.6-sol");
+
+  const selectedModel = catalog.find((item) => String(item.value) === modelSelect.value) || {};
+  const fallbackEfforts = state.hybridAgentic?.options?.codex_reasoning_efforts || [];
+  const supported = Array.isArray(selectedModel.supported_reasoning_efforts) && selectedModel.supported_reasoning_efforts.length
+    ? selectedModel.supported_reasoning_efforts.map(String)
+    : fallbackEfforts.map((item) => String(item.value));
+  const labels = new Map(fallbackEfforts.map((item) => [String(item.value), item.label]));
+  const previousEffort = reasoningSelect.value || status.default_reasoning_effort || "xhigh";
+  reasoningSelect.replaceChildren(...supported.map((effort) => new Option(labels.get(effort) || effort, effort)));
+  reasoningSelect.value = supported.includes(previousEffort)
+    ? previousEffort
+    : (supported.includes("xhigh") ? "xhigh" : String(selectedModel.default_reasoning_effort || supported[0] || "medium"));
+}
+
+function syncHybridOptionContract() {
+  const defaults = state.hybridAgentic?.defaults || {};
+  const gridMappings = [
+    ["hybridGridModels", "models"],
+    ["hybridGridFrames", "frames"],
+    ["hybridGridResolutions", "resolutions"],
+    ["hybridGridDualSM", "dual_softmax"],
+    ["hybridGridPrompts", "prompt_modes"],
+    ["hybridGridDecisionModes", "decision_modes"],
+    ["hybridGridReviewScopes", "review_scopes"],
+    ["hybridGridShortlists", "shortlist_sizes"],
+    ["hybridGridMargins", "ambiguity_margins"],
+    ["hybridGridMaxSegments", "reviewed_segments"],
+    ["hybridGridSearchBudgets", "search_budgets"],
+  ];
+  gridMappings.forEach(([id, key]) => populateHybridSelect(id, key, defaults[key] || []));
+  populateHybridSelect("sessionVideoprismModel", "models", ["videoprism_lvt_public_v1_large"]);
+  populateHybridSelect("sessionAgentDecisionMode", "decision_modes", ["advisory"]);
+  populateHybridSelect("sessionAgentReviewScope", "review_scopes", ["all"]);
+  populateHybridSelect("sessionAgentShortlist", "shortlist_sizes", ["5"]);
+  populateHybridSelect("sessionAgentMargin", "ambiguity_margins", ["0.05"]);
+  populateHybridSelect("sessionAgentMaxSegments", "reviewed_segments", ["10"]);
+  populateHybridSelect("sessionAgentSearchBudget", "search_budgets", ["2"]);
+  syncCodexRuntimeControls("hybridGridCodexModel", "hybridGridCodexReasoning");
+  syncCodexRuntimeControls("sessionAgentCodexModel", "sessionAgentCodexReasoning");
+}
+
 function updatePipelineControls() {
   setPipelineVisible("quick-openclip", $("quickEncoder")?.value === "openclip");
   setPipelineVisible("full-custom-paths", !$("fullBenchmark")?.value);
@@ -1067,6 +1246,66 @@ function updatePipelineControls() {
   const vpAssignments = selectedValues("videoprismGridAssignments");
   const vpQueryModes = selectedValues("videoprismGridQueryModes");
   const vpScoreNormalizations = selectedValues("videoprismGridScoreNormalizations");
+  const hybridStatus = $("hybridAgenticStatus");
+  const hybridFast = $("hybridGridFastMode")?.checked ?? true;
+  const hybridUsesCodex = $("hybridGridUseCodex")?.checked || false;
+  const hybridDecisionModes = $("hybridGridDecisionModes");
+  Array.from(hybridDecisionModes?.options || []).forEach((option) => {
+    if (option.value === "hard_lock") {
+      option.disabled = !hybridUsesCodex;
+      if (!hybridUsesCodex) option.selected = false;
+    }
+  });
+  if (hybridDecisionModes && !selectedValues("hybridGridDecisionModes").length) {
+    const advisory = Array.from(hybridDecisionModes.options).find((option) => option.value === "advisory");
+    if (advisory) advisory.selected = true;
+  }
+  const hybridUsesHardConstraints = selectedValues("hybridGridDecisionModes").includes("hard_lock");
+  const hybridReviewScopes = selectedValues("hybridGridReviewScopes");
+  const hybridUsesAmbiguityScope = hybridReviewScopes.includes("ambiguous");
+  const hybridUsesFullAudit = hybridFast || hybridReviewScopes.includes("all");
+  const hybridVerifyCycles = hybridUsesCodex && hybridUsesFullAudit && ($("hybridGridVerifyCycles")?.checked ?? true);
+  const hybridNoContactSheets = $("hybridGridNoContactSheets");
+  if (hybridNoContactSheets) {
+    if (hybridUsesHardConstraints || hybridVerifyCycles) hybridNoContactSheets.checked = false;
+    hybridNoContactSheets.disabled = hybridUsesHardConstraints || hybridVerifyCycles;
+    hybridNoContactSheets.title = hybridUsesHardConstraints
+      ? "Direct visual inspection is required before a hard constraint can be applied."
+      : hybridVerifyCycles
+        ? "The independent assignment-component critic requires sampled-frame evidence."
+      : "Disable sampled-frame inspection for advisory-only runs.";
+  }
+  syncCodexRuntimeControls("hybridGridCodexModel", "hybridGridCodexReasoning");
+  if (hybridStatus) {
+    const codex = state.hybridAgentic?.codex || {};
+    const runtimeMessage = codex.ready
+      ? `Codex CLI is authenticated at ${codex.path}; hybrid jobs can use the isolated MCP agent.`
+      : (codex.available
+        ? `Codex CLI is installed at ${codex.path} but is not authenticated. Requested Codex jobs will fail clearly.`
+        : (codex.message || "Codex CLI is unavailable. Requested Codex jobs will fail clearly."));
+    const sweepMessage = hybridFast
+      ? "Fast mode uses the best saved pure VideoPrism backbone and tests 8 agent-control configurations."
+      : "Manual hybrid sweep selectors are active.";
+    hybridStatus.textContent = `${runtimeMessage} ${sweepMessage} Without Codex selected, runs are explicitly labeled deterministic_heuristic.`;
+  }
+  [
+    "hybridGridModels",
+    "hybridGridFrames",
+    "hybridGridResolutions",
+    "hybridGridDualSM",
+    "hybridGridPrompts",
+    "hybridGridDecisionModes",
+    "hybridGridReviewScopes",
+    "hybridGridShortlists",
+    "hybridGridMargins",
+    "hybridGridMaxSegments",
+    "hybridGridSearchBudgets",
+  ].forEach((id) => setSelectEnabled(id, !hybridFast));
+  setSelectEnabled("hybridGridMaxSegments", !hybridFast && hybridUsesAmbiguityScope);
+  setPipelineVisible("hybrid-codex", hybridUsesCodex);
+  setSelectEnabled("hybridGridCodexModel", hybridUsesCodex);
+  setSelectEnabled("hybridGridCodexReasoning", hybridUsesCodex);
+  setSelectEnabled("hybridGridVerifyCycles", hybridUsesCodex && hybridUsesFullAudit);
   const usesCoherence = vpAssignments.includes("coherence_beam");
   const usesCsls = vpScoreNormalizations.includes("csls");
   const usesContext = vpQueryModes.some((mode) => ["context_window", "hybrid_llm"].includes(mode));
@@ -1090,6 +1329,13 @@ function bindPipelineControls() {
     "videoprismGridAssignments",
     "videoprismGridScoreNormalizations",
     "videoprismGridQueryModes",
+    "hybridGridFastMode",
+    "hybridGridUseCodex",
+    "hybridGridCodexModel",
+    "hybridGridDecisionModes",
+    "hybridGridReviewScopes",
+    "hybridGridNoContactSheets",
+    "hybridGridVerifyCycles",
   ].forEach((id) => {
     const element = $(id);
     if (element) element.addEventListener("change", updatePipelineControls);
@@ -1151,6 +1397,26 @@ async function submitJob(action) {
       use_query_cache: usesVpLlmQuery ? $("videoprismGridUseQueryCache").checked : true,
       no_windowing: $("videoprismGridNoWindowing").checked,
     },
+    "hybrid-agentic-grid-search": {
+      benchmark: $("hybridGridBenchmark").value,
+      fast_grid: $("hybridGridFastMode").checked,
+      models: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridModels"),
+      frames: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridFrames"),
+      resolutions: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridResolutions"),
+      dual_softmax: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridDualSM"),
+      prompt_modes: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridPrompts"),
+      agent_decision_modes: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridDecisionModes"),
+      agent_review_scopes: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridReviewScopes"),
+      shortlist_sizes: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridShortlists"),
+      ambiguity_margins: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridMargins"),
+      max_agent_segments_list: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridMaxSegments"),
+      agent_search_budgets: $("hybridGridFastMode").checked ? [] : selectedValues("hybridGridSearchBudgets"),
+      use_codex: $("hybridGridUseCodex").checked,
+      codex_model: $("hybridGridCodexModel")?.value || "gpt-5.6-sol",
+      codex_reasoning_effort: $("hybridGridCodexReasoning")?.value || "xhigh",
+      no_contact_sheets: $("hybridGridNoContactSheets").checked,
+      no_cycle_critic: !($("hybridGridVerifyCycles")?.checked ?? true),
+    },
     "write-a-video-grid-search": {
       benchmark: $("wavGridBenchmark").value,
       models: selectedValues("wavGridModels"),
@@ -1176,6 +1442,29 @@ async function submitJob(action) {
   if (Object.prototype.hasOwnProperty.call(payload, "benchmark") && !payload.benchmark) {
     setStatus("pipelineStatus", "Choose a benchmark before launching this job.", true);
     return;
+  }
+  if (action === "hybrid-agentic-grid-search" && payload.use_codex && !state.hybridAgentic?.codex?.ready) {
+    setStatus("pipelineStatus", "Codex MCP was selected, but Codex CLI is not authenticated and ready.", true);
+    return;
+  }
+  if (action === "hybrid-agentic-grid-search" && !payload.fast_grid) {
+    const requiredSelections = [
+      payload.models,
+      payload.frames,
+      payload.resolutions,
+      payload.dual_softmax,
+      payload.prompt_modes,
+      payload.agent_decision_modes,
+      payload.agent_review_scopes,
+      payload.shortlist_sizes,
+      payload.ambiguity_margins,
+      payload.max_agent_segments_list,
+      payload.agent_search_budgets,
+    ];
+    if (requiredSelections.some((values) => !values.length)) {
+      setStatus("pipelineStatus", "Select at least one value in every manual hybrid sweep control.", true);
+      return;
+    }
   }
 
   try {
@@ -1279,7 +1568,7 @@ async function restartServer() {
 }
 
 async function stopServer() {
-  const restartCommand = state.server?.restart_command || "cd /data/giannis_pantrakis/video-sequencer && /home/giannis_pantrakis/miniconda3/bin/python src/webapp.py";
+  const restartCommand = state.server?.restart_command || "cd /path/to/video-sequencer && python src/webapp.py";
   const restartButton = $("restartServer");
   const stopButton = $("stopServer");
   if (restartButton) restartButton.disabled = true;
@@ -1328,6 +1617,11 @@ function bindEvents() {
   $("sessionSegments").addEventListener("input", updateSessionModeControls);
   $("sessionAssignmentMethod").addEventListener("change", updateSessionModeControls);
   $("sessionQueryMode").addEventListener("change", updateSessionModeControls);
+  $("sessionAgentUseCodex")?.addEventListener("change", updateSessionModeControls);
+  $("sessionAgentCycleCritic")?.addEventListener("change", updateSessionModeControls);
+  $("sessionAgentDecisionMode")?.addEventListener("change", updateSessionModeControls);
+  $("sessionAgentContactSheets")?.addEventListener("change", updateSessionModeControls);
+  $("sessionAgentCodexModel")?.addEventListener("change", updateSessionModeControls);
   $("createSession").addEventListener("click", createSession);
   $("refreshSessions").addEventListener("click", refreshBootstrap);
   $("saveSegment").addEventListener("click", saveSegmentSettings);

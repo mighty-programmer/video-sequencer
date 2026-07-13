@@ -17,6 +17,14 @@ import time
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
+from hybrid_options import (
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_REASONING_EFFORT,
+    HYBRID_DEFAULT_SELECTIONS,
+    HYBRID_OPTIONS,
+    codex_reasoning_options,
+    load_codex_model_catalog,
+)
 from server_runtime import (
     SERVER_PORT,
     clear_server_state,
@@ -123,6 +131,41 @@ def get_yes_no(prompt: str, default: bool = True) -> bool:
     except (KeyboardInterrupt, EOFError):
         print()
         return default
+
+
+def get_option(prompt: str, options: List[Tuple[str, str]], default: str) -> str:
+    """Select one validated value while displaying a friendly label."""
+    print(f"\n  {Colors.BOLD}{prompt}{Colors.END}")
+    for index, (value, label) in enumerate(options, 1):
+        marker = " (default)" if value == default else ""
+        print(f"  {Colors.GREEN}{index}.{Colors.END} {label}{Colors.DIM}{marker}{Colors.END}")
+    while True:
+        raw = get_input("Select option", str(next((i for i, item in enumerate(options, 1) if item[0] == default), 1)))
+        try:
+            selected = int(raw)
+        except ValueError:
+            selected = -1
+        if 1 <= selected <= len(options):
+            return options[selected - 1][0]
+        print(f"  {Colors.RED}Choose a number between 1 and {len(options)}.{Colors.END}")
+
+
+def get_multi_options(prompt: str, options: List[Tuple[str, str]], defaults: List[str]) -> List[str]:
+    """Select one or more validated values using comma-separated menu numbers."""
+    print(f"\n  {Colors.BOLD}{prompt}{Colors.END}")
+    for index, (value, label) in enumerate(options, 1):
+        marker = " (default)" if value in defaults else ""
+        print(f"  {Colors.GREEN}{index}.{Colors.END} {label}{Colors.DIM}{marker}{Colors.END}")
+    default_numbers = ",".join(str(i) for i, item in enumerate(options, 1) if item[0] in defaults)
+    while True:
+        raw = get_input("Select one or more numbers (comma-separated)", default_numbers)
+        try:
+            indexes = [int(value.strip()) for value in raw.split(",") if value.strip()]
+        except ValueError:
+            indexes = []
+        if indexes and all(1 <= index <= len(options) for index in indexes):
+            return list(dict.fromkeys(options[index - 1][0] for index in indexes))
+        print(f"  {Colors.RED}Choose one or more numbers between 1 and {len(options)}.{Colors.END}")
 
 
 def browse_directory(prompt: str, default: str = None) -> str:
@@ -1161,7 +1204,356 @@ def screen_wav_grid_search(config: Dict):
         print(f"  {Colors.RED}Error: {e}{Colors.END}")
     
     input("\n  Press Enter to continue...")
+def _hybrid_options(key: str) -> List[Tuple[str, str]]:
+    return [(str(option['value']), str(option['label'])) for option in HYBRID_OPTIONS[key]]
 
+
+HYBRID_MODELS = _hybrid_options('models')
+HYBRID_FRAMES = _hybrid_options('frames')
+HYBRID_RESOLUTIONS = _hybrid_options('resolutions')
+HYBRID_PROMPTS = _hybrid_options('prompt_modes')
+HYBRID_DECISION_MODES = _hybrid_options('decision_modes')
+HYBRID_REVIEW_SCOPES = _hybrid_options('review_scopes')
+HYBRID_SHORTLISTS = _hybrid_options('shortlist_sizes')
+HYBRID_MARGINS = _hybrid_options('ambiguity_margins')
+HYBRID_REVIEW_COUNTS = _hybrid_options('reviewed_segments')
+HYBRID_SEARCH_BUDGETS = _hybrid_options('search_budgets')
+
+
+def get_codex_runtime_selection() -> Tuple[str, str]:
+    """Select one compatible Codex model/reasoning pair from the live CLI cache."""
+    catalog = load_codex_model_catalog()
+    models = [(str(item['value']), str(item['label'])) for item in catalog]
+    model = get_option("Codex reasoning model", models, DEFAULT_CODEX_MODEL)
+    effort_options = [
+        (str(item['value']), str(item['label']))
+        for item in codex_reasoning_options(model, catalog)
+    ]
+    supported = {value for value, _ in effort_options}
+    model_default = next(
+        (str(item.get('default_reasoning_effort', 'medium')) for item in catalog if item.get('value') == model),
+        'medium',
+    )
+    default_effort = DEFAULT_CODEX_REASONING_EFFORT if DEFAULT_CODEX_REASONING_EFFORT in supported else model_default
+    effort = get_option("Codex reasoning effort", effort_options, default_effort)
+    return model, effort
+
+
+def _hybrid_output_dir(config: Dict, benchmark_number: str) -> str:
+    output_root = Path(config.get('output', './output'))
+    return str(output_root / f"benchmark_{benchmark_number}" / 'hybrid_agentic')
+
+
+def screen_hybrid_agentic_status(config: Dict):
+    """Check Codex CLI installation and authentication for hybrid MCP runs."""
+    clear_screen()
+    print_header()
+    print_title("Hybrid Agentic Availability")
+    cmd = [sys.executable, 'src/hybrid_agentic.py', '--mode', 'check-codex']
+    subprocess.run(cmd, cwd=str(Path(__file__).parent.parent))
+    print(f"\n  {Colors.DIM}A run uses Codex MCP only when ready=true and --use-codex is selected. Requested Codex failures are reported and never replaced by another algorithm.{Colors.END}")
+    input("\n  Press Enter to continue...")
+
+
+def screen_hybrid_agentic_benchmark(config: Dict):
+    """Run one hybrid agentic VideoPrism benchmark."""
+    clear_screen()
+    print_header()
+    print_title("Hybrid Agentic VideoPrism Benchmark")
+    bm = select_benchmark()
+    if bm is None:
+        return
+    if not bm['has_segments'] or not bm['has_ground_truth']:
+        print(f"  {Colors.RED}Hybrid benchmark mode needs segment and ground-truth files.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    output_dir = get_input("Output directory", _hybrid_output_dir(config, str(bm['number'])))
+    gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
+    model = get_option("VideoPrism model", HYBRID_MODELS, 'videoprism_lvt_public_v1_large')
+    frames = get_option("Sampled frames", HYBRID_FRAMES, '8')
+    resolution = get_option("Resolution", HYBRID_RESOLUTIONS, '288')
+    dual = get_yes_no("Use Dual Softmax?", default=True)
+    prompt_mode = get_option("Baseline prompt mode (never applied to Codex searches)", HYBRID_PROMPTS, 'none')
+    review_scope = get_option("Agent review scope", HYBRID_REVIEW_SCOPES, 'all')
+    decision_mode = get_option("Agent decision mode", HYBRID_DECISION_MODES, 'advisory')
+    shortlist = get_option("Agent shortlist size", HYBRID_SHORTLISTS, '5')
+    margin = get_option("Ambiguity margin threshold", HYBRID_MARGINS, '0.05')
+    max_segments = get_option("Max reviewed segments", HYBRID_REVIEW_COUNTS, '10') if review_scope == 'ambiguous' else '10'
+    if review_scope == 'all':
+        print(f"  {Colors.DIM}Full-sequence audit reviews every script row; the reviewed-segment limit is not used.{Colors.END}")
+    budget = get_option("Custom FAISS search budget per reviewed segment", HYBRID_SEARCH_BUDGETS, '2')
+    contact_sheets = True if decision_mode == 'hard_lock' else get_yes_no("Allow contact-sheet inspection?", default=True)
+    if decision_mode == 'hard_lock':
+        print(f"  {Colors.DIM}Contact-sheet inspection is required for evidence-gated hard constraints.{Colors.END}")
+    use_codex = get_yes_no("Use the authenticated Codex MCP agent?", default=True)
+    verify_cycles = False
+    if decision_mode == 'hard_lock' and not use_codex:
+        decision_mode = 'advisory'
+        print(f"  {Colors.DIM}Decision mode changed to advisory because hard constraints require the authenticated Codex MCP agent.{Colors.END}")
+    codex_model, codex_reasoning_effort = DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT
+    if use_codex:
+        codex_model, codex_reasoning_effort = get_codex_runtime_selection()
+        if review_scope == 'all':
+            verify_cycles = get_yes_no(
+                "Verify every proposed assignment component with an independent Codex visual critic?",
+                default=True,
+            )
+            if verify_cycles and not contact_sheets:
+                contact_sheets = True
+                print(f"  {Colors.DIM}Contact-sheet inspection was enabled for the independent cycle critic.{Colors.END}")
+
+    cmd = [
+        sys.executable, 'src/hybrid_agentic.py',
+        '--mode', 'benchmark',
+        '--benchmark', str(bm['number']),
+        '--output', output_dir,
+        '--cache-dir', config.get('cache_dir', './cache'),
+        '--device', gpu_device,
+        '--model', model,
+        '--num-frames', str(frames),
+        '--resolution', str(resolution),
+        '--prompt-mode', prompt_mode,
+        '--agent-review-scope', review_scope,
+        '--agent-decision-mode', decision_mode,
+        '--shortlist-size', str(shortlist),
+        '--ambiguity-margin-threshold', str(margin),
+        '--max-agent-segments', str(max_segments),
+        '--agent-search-budget-per-segment', str(budget),
+    ]
+    if dual:
+        cmd.append('--use-dual-softmax')
+    if not contact_sheets:
+        cmd.append('--no-contact-sheets')
+    if use_codex and review_scope == 'all' and not verify_cycles:
+        cmd.append('--no-cycle-critic')
+    if use_codex:
+        cmd.extend([
+            '--use-codex',
+            '--codex-model', codex_model,
+            '--codex-reasoning-effort', codex_reasoning_effort,
+        ])
+
+    print(f"\n{Colors.BOLD}{Colors.BLUE}  Command:{Colors.END}")
+    print("  " + " ".join(cmd))
+    if not get_yes_no("Run hybrid agentic benchmark?", default=True):
+        return
+    subprocess.run(cmd, cwd=str(Path(__file__).parent.parent))
+    input("\n  Press Enter to continue...")
+
+
+def screen_hybrid_agentic_grid_search(config: Dict):
+    """Run or estimate the hybrid agentic VideoPrism grid search."""
+    clear_screen()
+    print_header()
+    print_title("Hybrid Agentic VideoPrism Grid Search")
+    bm = select_benchmark()
+    if bm is None:
+        return
+    if not bm['has_segments'] or not bm['has_ground_truth']:
+        print(f"  {Colors.RED}Hybrid grid search needs segment and ground-truth files.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    output_dir = get_input("Output directory", _hybrid_output_dir(config, str(bm['number'])))
+    gpu_device = get_input("GPU device", config.get('gpu_device', 'cuda:0'))
+    fast_mode = get_yes_no("Use FAST MODE sweep?", default=True)
+    use_codex = get_yes_no("Run a Codex MCP pass for every tested configuration? (can be expensive)", default=False)
+    codex_model, codex_reasoning_effort = DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT
+    if use_codex:
+        codex_model, codex_reasoning_effort = get_codex_runtime_selection()
+    contact_sheets = get_yes_no("Allow contact-sheet inspection?", default=True)
+
+    manual_values = {}
+    if fast_mode:
+        print(f"\n  {Colors.CYAN}Fast mode loads the best saved pure VideoPrism backbone and tests 8 agent-control configurations.{Colors.END}")
+    else:
+        review_scopes = get_multi_options(
+            "Agent review scopes",
+            HYBRID_REVIEW_SCOPES,
+            HYBRID_DEFAULT_SELECTIONS['review_scopes'],
+        )
+        manual_values = {
+            '--models': get_multi_options("VideoPrism models", HYBRID_MODELS, HYBRID_DEFAULT_SELECTIONS['models']),
+            '--frames': get_multi_options("Sampled frame counts", HYBRID_FRAMES, HYBRID_DEFAULT_SELECTIONS['frames']),
+            '--resolutions': get_multi_options("Resolutions", HYBRID_RESOLUTIONS, HYBRID_DEFAULT_SELECTIONS['resolutions']),
+            '--dual-softmax': get_multi_options("Dual Softmax", _hybrid_options('dual_softmax'), HYBRID_DEFAULT_SELECTIONS['dual_softmax']),
+            '--prompt-modes': get_multi_options("Baseline prompt modes (never applied to Codex searches)", HYBRID_PROMPTS, HYBRID_DEFAULT_SELECTIONS['prompt_modes']),
+            '--agent-decision-modes': get_multi_options("Agent decision modes", HYBRID_DECISION_MODES, HYBRID_DEFAULT_SELECTIONS['decision_modes']),
+            '--agent-review-scopes': review_scopes,
+            '--shortlist-sizes': get_multi_options("Agent shortlist sizes", HYBRID_SHORTLISTS, HYBRID_DEFAULT_SELECTIONS['shortlist_sizes']),
+            '--ambiguity-margins': get_multi_options("Ambiguity margins", HYBRID_MARGINS, HYBRID_DEFAULT_SELECTIONS['ambiguity_margins']),
+            '--max-agent-segments-list': (
+                get_multi_options("Reviewed-segment limits", HYBRID_REVIEW_COUNTS, HYBRID_DEFAULT_SELECTIONS['reviewed_segments'])
+                if 'ambiguous' in review_scopes else ['10']
+            ),
+            '--agent-search-budgets': get_multi_options("Custom FAISS searches per reviewed segment", HYBRID_SEARCH_BUDGETS, HYBRID_DEFAULT_SELECTIONS['search_budgets']),
+        }
+        if not use_codex and 'hard_lock' in manual_values['--agent-decision-modes']:
+            manual_values['--agent-decision-modes'] = [
+                value for value in manual_values['--agent-decision-modes'] if value != 'hard_lock'
+            ] or ['advisory']
+            print(f"  {Colors.DIM}Hard-constraint configurations were removed because Codex MCP is not enabled.{Colors.END}")
+        if 'hard_lock' in manual_values['--agent-decision-modes'] and not contact_sheets:
+            contact_sheets = True
+            print(f"  {Colors.DIM}Contact-sheet inspection was enabled because the sweep includes evidence-gated hard constraints.{Colors.END}")
+
+    uses_full_audit = fast_mode or 'all' in manual_values.get('--agent-review-scopes', [])
+    verify_cycles = False
+    if use_codex and uses_full_audit:
+        verify_cycles = get_yes_no(
+            "Verify each full-audit assignment component with an independent Codex visual critic?",
+            default=True,
+        )
+        if verify_cycles and not contact_sheets:
+            contact_sheets = True
+            print(f"  {Colors.DIM}Contact-sheet inspection was enabled for the independent cycle critic.{Colors.END}")
+
+    base_cmd = [
+        sys.executable, 'src/hybrid_agentic.py',
+        '--benchmark', str(bm['number']),
+        '--output', output_dir,
+        '--cache-dir', config.get('cache_dir', './cache'),
+        '--device', gpu_device,
+    ]
+    if fast_mode:
+        base_cmd.append('--fast-grid')
+    else:
+        for flag, values in manual_values.items():
+            base_cmd.extend([flag] + values)
+    if use_codex:
+        base_cmd.extend([
+            '--use-codex',
+            '--codex-model', codex_model,
+            '--codex-reasoning-effort', codex_reasoning_effort,
+        ])
+    if not contact_sheets:
+        base_cmd.append('--no-contact-sheets')
+    if use_codex and uses_full_audit and not verify_cycles:
+        base_cmd.append('--no-cycle-critic')
+
+    estimate_cmd = base_cmd[:2] + ['--mode', 'estimate'] + base_cmd[2:]
+    print(f"\n{Colors.CYAN}Estimating requested hybrid grid size...{Colors.END}")
+    subprocess.run(estimate_cmd, cwd=str(Path(__file__).parent.parent))
+
+    if not get_yes_no("Launch hybrid agentic grid search now?", default=False):
+        return
+    run_cmd = base_cmd[:2] + ['--mode', 'grid'] + base_cmd[2:]
+    subprocess.run(run_cmd, cwd=str(Path(__file__).parent.parent))
+    input("\n  Press Enter to continue...")
+
+
+def screen_hybrid_agentic_editing_session(config: Dict):
+    """Create a hybrid agentic editor session through the Web UI backend."""
+    import json
+    import time
+    import urllib.error
+    import urllib.request
+
+    clear_screen()
+    print_header()
+    print_title("Hybrid Agentic Editing Session")
+    bm = select_benchmark()
+    if bm is None:
+        return
+    if not bm['has_segments']:
+        print(f"  {Colors.RED}Hybrid editor sessions need a segment file or benchmark segments.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    session_name = get_input("Session name", f"hybrid-benchmark-{bm['number']}-cli")
+    candidate_pool = get_input("Candidate pool size", "10")
+    contact_sheets = get_yes_no("Allow contact-sheet inspection?", default=True)
+    use_codex = get_yes_no("Use the authenticated Codex MCP agent?", default=True)
+    verify_cycles = get_yes_no(
+        "Verify proposed assignment components with an independent Codex visual critic?",
+        default=True,
+    ) if use_codex else False
+    if verify_cycles and not contact_sheets:
+        contact_sheets = True
+        print(f"  {Colors.DIM}Contact-sheet inspection was enabled for the independent cycle critic.{Colors.END}")
+    codex_model, codex_reasoning_effort = DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT
+    if use_codex:
+        codex_model, codex_reasoning_effort = get_codex_runtime_selection()
+    print(f"  {Colors.DIM}The best saved hybrid grid settings will supply the backbone and agent tuning parameters.{Colors.END}")
+
+    status = get_server_status(config)
+    if not status.get('running'):
+        if not get_yes_no("Web UI server is not running. Start it now?", default=True):
+            return
+        result = start_server(config)
+        print(f"  {result.get('message')}")
+        time.sleep(2)
+        status = get_server_status(config)
+    if not status.get('running') or not status.get('url'):
+        print(f"  {Colors.RED}Could not reach the Web UI server. Use Server Control to inspect it.{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    payload = {
+        'payload': {
+            'name': session_name,
+            'benchmark': str(bm['number']),
+            'retrieval_mode': 'hybrid_agentic',
+            'exact_matching_mode': True,
+            'use_best_grid_search': True,
+            'candidate_pool_size': int(candidate_pool or 10),
+            'agent_enabled': True,
+            'agent_allow_contact_sheet': contact_sheets,
+            'agent_verify_assignment_cycles': verify_cycles,
+            'use_codex': use_codex,
+            'codex_model': codex_model,
+            'codex_reasoning_effort': codex_reasoning_effort,
+        }
+    }
+    url = status['url'].rstrip('/') + '/api/editor/sessions'
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    print(f"\n  {Colors.CYAN}Creating hybrid editor session via {url} ...{Colors.END}")
+    try:
+        with urllib.request.urlopen(request, timeout=900) as response:
+            session = json.load(response)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='replace')
+        print(f"  {Colors.RED}Server returned {exc.code}: {body}{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+    except Exception as exc:
+        print(f"  {Colors.RED}Could not create session: {exc}{Colors.END}")
+        input("\n  Press Enter to continue...")
+        return
+
+    print(f"  {Colors.GREEN}✓ Hybrid editor session created{Colors.END}")
+    print(f"  Session ID: {session.get('session_id')}")
+    print(f"  Open: {status['url']}")
+    print(f"  Runtime: {session.get('config', {}).get('agent_runtime', 'unknown')}")
+    input("\n  Press Enter to continue...")
+
+
+def screen_hybrid_agentic_logs(config: Dict):
+    """List saved hybrid agentic logs and best result files."""
+    clear_screen()
+    print_header()
+    print_title("Hybrid Agentic Logs")
+    output_root = Path(config.get('output', './output'))
+    project_root = Path(__file__).parent.parent
+    root = output_root if output_root.is_absolute() else project_root / output_root
+    if not root.exists():
+        print(f"  {Colors.YELLOW}No output directory found at {root}{Colors.END}")
+    else:
+        matches = sorted(root.rglob('hybrid_agentic_run_log.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:20]
+        results = sorted(root.rglob('hybrid_agentic_grid_search_results.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+        print(f"  {Colors.BOLD}Recent run logs:{Colors.END}")
+        for item in matches:
+            print(f"  - {item}")
+        print(f"\n  {Colors.BOLD}Recent result summaries:{Colors.END}")
+        for item in results:
+            print(f"  - {item}")
+    input("\n  Press Enter to continue...")
 
 def screen_benchmark_upload(config: Dict):
     """Upload a benchmark from a local folder."""
@@ -1664,12 +2056,17 @@ def main_menu():
         4: screen_videoprism_grid_search,
         5: screen_wav_grid_search,
         6: screen_compare_all_models, # New function
-        7: screen_benchmark_upload,
-        8: screen_benchmark_download,
-        9: screen_benchmark_delete,
-        10: screen_cache_management,
-        11: screen_server_control,
-        12: screen_settings,
+        7: screen_hybrid_agentic_benchmark,
+        8: screen_hybrid_agentic_grid_search,
+        9: screen_hybrid_agentic_editing_session,
+        10: screen_hybrid_agentic_status,
+        11: screen_hybrid_agentic_logs,
+        12: screen_benchmark_upload,
+        13: screen_benchmark_download,
+        14: screen_benchmark_delete,
+        15: screen_cache_management,
+        16: screen_server_control,
+        17: screen_settings,
     }
 
     while True:
@@ -1686,6 +2083,11 @@ def main_menu():
             ("VideoPrism Grid Search", "Find optimal VideoPrism parameters via automated sweep"),
             ("Write-A-Video Grid Search", "Two-stage retrieval: keyword filtering + OpenCLIP reranking"),
             ("Compare All Models (Parallel Grid Search)", "Run all grid searches in parallel background sessions"), # New menu item
+            ("Hybrid Agentic Benchmark", "Run one VideoPrism/FAISS benchmark with optional Codex MCP review"),
+            ("Hybrid Agentic Grid Search", "Sweep hybrid VideoPrism backbone and agent-review parameters"),
+            ("Hybrid Agentic Editing Session", "Create a Web UI editor session using the hybrid pipeline"),
+            ("Hybrid Codex/MCP Status", "Check Codex CLI installation, authentication, and MCP readiness"),
+            ("Hybrid Logs", "Inspect saved hybrid run logs and grid-search result files"),
             ("Upload Benchmark", "Import a local folder as a new benchmark (via scp)"),
             ("Download Benchmark", "Export a benchmark to a single folder for download"),
             ("Delete Benchmark", "Permanently remove a benchmark and all its files"),

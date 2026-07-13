@@ -17,6 +17,7 @@ from pydantic import BaseModel
 # so terminal progress bars can fail with BrokenPipeError when detached.
 os.environ.setdefault("VIDEO_SEQUENCER_DISABLE_PROGRESS", "1")
 
+from hybrid_options import HYBRID_DEFAULT_SELECTIONS, HYBRID_OPTIONS
 from web_backend import (
     PROJECT_ROOT,
     SAFE_MEDIA_EXTENSIONS,
@@ -26,6 +27,7 @@ from web_backend import (
     cache_manager,
     editor_manager,
     job_manager,
+    hybrid_codex_status,
     load_best_grid_search_config,
     load_grid_search_analysis,
     server_control_manager,
@@ -70,6 +72,11 @@ def bootstrap() -> Dict[str, Any]:
         "cache": cache_manager.inspect(settings.get("cache_dir", "./cache"), settings.get("output", "./output")),
         "jobs": job_manager.list_jobs(),
         "sessions": editor_manager.list_sessions(),
+        "hybrid_agentic": {
+            "codex": hybrid_codex_status(),
+            "options": HYBRID_OPTIONS,
+            "defaults": HYBRID_DEFAULT_SELECTIONS,
+        },
     }
 
 
@@ -115,6 +122,11 @@ def stop_server() -> Dict[str, Any]:
 @app.post("/api/server/restart")
 def restart_server() -> Dict[str, Any]:
     return server_control_manager.restart()
+
+
+@app.get("/api/hybrid-agentic/status")
+def get_hybrid_agentic_status() -> Dict[str, Any]:
+    return {"codex": hybrid_codex_status()}
 
 
 @app.get("/api/cache")

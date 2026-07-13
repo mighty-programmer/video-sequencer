@@ -13,6 +13,7 @@ service layer that the web app can call for:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -37,6 +38,7 @@ import cv2
 import numpy as np
 
 from assembly import VideoAssembler, VideoSequenceBuilder
+from hybrid_options import DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT
 from main import load_manual_segments
 from matching import ClipSelection, EnsembleVideoTextMatcher, PromptedVideoTextMatcher, VideoTextMatcher
 from menu import discover_benchmark_numbers
@@ -963,6 +965,12 @@ def _grid_search_result_paths(output_dir: str, benchmark: Any, retrieval_mode: s
     elif mode == "videoprism":
         filenames = ["videoprism/videoprism_grid_search_results.json", "videoprism_grid_search_results.json"]
         recursive_name = "videoprism_grid_search_results.json"
+    elif mode in {"hybrid_agentic", "agentic_videoprism", "hybrid"}:
+        filenames = [
+            "hybrid_agentic/hybrid_agentic_grid_search_results.json",
+            "hybrid_agentic_grid_search_results.json",
+        ]
+        recursive_name = "hybrid_agentic_grid_search_results.json"
     else:
         filenames = ["wav/wav_grid_search_results.json", "wav_grid_search_results.json"]
         recursive_name = "wav_grid_search_results.json"
@@ -973,6 +981,11 @@ def _grid_search_result_paths(output_dir: str, benchmark: Any, retrieval_mode: s
         output_path / "comparison_multi" / f"benchmark_{benchmark_id}",
     ]
     candidates: List[Path] = [root / filename for root in roots for filename in filenames]
+    if mode in {"hybrid_agentic", "agentic_videoprism", "hybrid"}:
+        for root in roots:
+            hybrid_dir = root / "hybrid_agentic"
+            if hybrid_dir.exists():
+                candidates.extend(hybrid_dir.glob("hybrid_agentic_grid_search_results_*.json"))
 
     # Backward compatibility for older Web UI/manual runs that wrote directly
     # under output/ or ad-hoc benchmark folders instead of the canonical path.
@@ -995,7 +1008,11 @@ def _grid_search_result_paths(output_dir: str, benchmark: Any, retrieval_mode: s
 
 def _grid_search_output_dir(output_dir: str, benchmark: Any, retrieval_mode: str) -> str:
     benchmark_id = _normalize_benchmark_id(benchmark)
-    mode = "writeavideo" if retrieval_mode in {"write-a-video", "wav"} else str(retrieval_mode or "writeavideo").lower()
+    mode = str(retrieval_mode or "writeavideo").lower()
+    if mode in {"write-a-video", "wav"}:
+        mode = "writeavideo"
+    if mode in {"agentic_videoprism", "hybrid"}:
+        mode = "hybrid_agentic"
     mode_dir = "wav" if mode == "writeavideo" else mode
     output_path = Path(_resolve_path(output_dir) or output_dir)
     if not benchmark_id:
@@ -1006,17 +1023,42 @@ def _grid_search_output_dir(output_dir: str, benchmark: Any, retrieval_mode: str
 def _prompt_settings_for_grid_config(retrieval_mode: str, config: Dict[str, Any]) -> Dict[str, Any]:
     prompt_mode = config.get("prompt_mode") or "none"
     settings: Dict[str, Any] = {"prompt_mode": prompt_mode, "prompt_template": None, "ensemble_prompts": None}
+    mode = str(retrieval_mode or "writeavideo").lower()
+    uses_videoprism_prompts = mode in {"videoprism", "hybrid_agentic", "agentic_videoprism", "hybrid"}
 
     if prompt_mode.startswith("template:"):
         key = prompt_mode.split(":", 1)[1]
-        if retrieval_mode == "videoprism":
-            settings["prompt_template"] = VIDEOPRISM_PROMPT_TEMPLATES.get(key)
-        else:
-            settings["prompt_template"] = PROMPT_TEMPLATES.get(key)
+        settings["prompt_template"] = VIDEOPRISM_PROMPT_TEMPLATES.get(key) if uses_videoprism_prompts else PROMPT_TEMPLATES.get(key)
     elif prompt_mode.startswith("ensemble"):
-        settings["ensemble_prompts"] = VIDEOPRISM_ENSEMBLE_TEMPLATES if retrieval_mode == "videoprism" else list(DEFAULT_ENSEMBLE_TEMPLATES)
+        settings["ensemble_prompts"] = VIDEOPRISM_ENSEMBLE_TEMPLATES if uses_videoprism_prompts else list(DEFAULT_ENSEMBLE_TEMPLATES)
 
     return settings
+
+
+def _effective_grid_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    flat = copy.deepcopy(config) if isinstance(config, dict) else {}
+    video_config = flat.get("video") if isinstance(flat.get("video"), dict) else {}
+    agent_config = flat.get("agent") if isinstance(flat.get("agent"), dict) else {}
+    for key, value in video_config.items():
+        flat.setdefault(key, value)
+    for key, value in agent_config.items():
+        flat.setdefault(f"agent_{key}", value)
+    if "agent_shortlist_size" not in flat and "shortlist_size" in agent_config:
+        flat["agent_shortlist_size"] = agent_config["shortlist_size"]
+    if "agent_ambiguity_margin_threshold" not in flat and "ambiguity_margin_threshold" in agent_config:
+        flat["agent_ambiguity_margin_threshold"] = agent_config["ambiguity_margin_threshold"]
+    return flat
+
+
+def hybrid_codex_status() -> Dict[str, Any]:
+    try:
+        from hybrid_agentic import codex_status
+
+        status = codex_status()
+    except Exception as exc:
+        return {"available": False, "authenticated": False, "ready": False, "path": None, "mode": "unavailable", "message": f"Codex CLI probe failed: {exc}"}
+    status["mode"] = "codex_mcp" if status.get("ready") else "unavailable"
+    return status
 
 
 def load_best_grid_search_config(output_dir: str, benchmark: Any, retrieval_mode: str) -> Optional[Dict[str, Any]]:
@@ -1027,10 +1069,18 @@ def load_best_grid_search_config(output_dir: str, benchmark: Any, retrieval_mode
         if result:
             candidates.append(result)
     if not candidates:
+        if mode in {"hybrid_agentic", "agentic_videoprism", "hybrid"}:
+            fallback = load_best_grid_search_config(output_dir, benchmark, "videoprism")
+            if fallback:
+                fallback = copy.deepcopy(fallback)
+                fallback["retrieval_mode"] = "hybrid_agentic"
+                fallback["fallback_from"] = "videoprism"
+                fallback["message"] = "No hybrid grid result was found; using the best pure VideoPrism retrieval config as the hybrid backbone."
+                return fallback
         return None
 
     best = max(candidates, key=lambda item: float(item.get("exact_match_accuracy", -1.0)))
-    config = copy.deepcopy(best.get("config", {}))
+    config = _effective_grid_config(copy.deepcopy(best.get("config", {})))
     prompt_settings = _prompt_settings_for_grid_config(mode, config)
     return {
         "benchmark": _normalize_benchmark_id(benchmark),
@@ -1050,6 +1100,7 @@ GRID_ANALYSIS_FILES = {
     "grid_search_results.json": "openclip",
     "videoprism_grid_search_results.json": "videoprism",
     "wav_grid_search_results.json": "writeavideo",
+    "hybrid_agentic_grid_search_results.json": "hybrid_agentic",
 }
 
 GRID_ANALYSIS_CONFIG_KEYS = [
@@ -1070,6 +1121,18 @@ GRID_ANALYSIS_CONFIG_KEYS = [
     "keyword_weight",
     "enable_object_detection",
     "enable_face_detection",
+    "agent_enabled",
+    "agent_decision_mode",
+    "agent_review_scope",
+    "agent_shortlist_size",
+    "agent_ambiguity_margin_threshold",
+    "agent_max_segments",
+    "agent_search_budget_per_segment",
+    "agent_codex_model",
+    "agent_codex_reasoning_effort",
+    "agent_verify_assignment_cycles",
+    "agent_cycle_critic_min_confidence",
+    "agent_runtime",
 ]
 
 
@@ -1099,13 +1162,19 @@ def _infer_benchmark_from_grid_payload(path: Path, payload: Dict[str, Any]) -> O
 def _grid_analysis_mode(path: Path, payload: Dict[str, Any]) -> str:
     if path.name in GRID_ANALYSIS_FILES:
         return GRID_ANALYSIS_FILES[path.name]
-    if payload.get("encoder") == "videoprism":
+    encoder = str(payload.get("encoder") or payload.get("retrieval_mode") or "").lower()
+    if encoder in {"hybrid_agentic", "agentic_videoprism", "hybrid"}:
+        return "hybrid_agentic"
+    if encoder == "videoprism":
         return "videoprism"
     if payload.get("matching") == "wav":
         return "writeavideo"
-    if "videoprism" in str(path).lower():
+    lowered = str(path).lower()
+    if "hybrid_agentic" in lowered or "agentic_videoprism" in lowered:
+        return "hybrid_agentic"
+    if "videoprism" in lowered:
         return "videoprism"
-    if "wav" in str(path).lower():
+    if "wav" in lowered:
         return "writeavideo"
     return "openclip"
 
@@ -1134,6 +1203,7 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
     rows: List[Dict[str, Any]] = []
     sources: List[Dict[str, Any]] = []
     seen_paths = set()
+    seen_runs = set()
 
     if not benchmark_id or not output_path.exists():
         return {
@@ -1150,6 +1220,7 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
     result_paths: List[Path] = []
     for filename in GRID_ANALYSIS_FILES:
         result_paths.extend(output_path.rglob(filename))
+    result_paths.extend(output_path.rglob("hybrid_agentic_grid_search_results_*.json"))
     for path in output_path.rglob("*_videoprism_coherence_beam_results.json"):
         # VideoPrism writes this companion file as a convenience copy when
         # coherence_beam is present. Avoid double-counting if the canonical
@@ -1177,6 +1248,18 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
             continue
 
         retrieval_mode = _grid_analysis_mode(path, payload)
+        run_key = None
+        if payload.get("timestamp"):
+            run_key = (
+                retrieval_mode,
+                str(payload["timestamp"]),
+                str(payload.get("video_dir") or ""),
+                int(payload.get("total_configs_tested") or len(results)),
+            )
+        if run_key and run_key in seen_runs:
+            continue
+        if run_key:
+            seen_runs.add(run_key)
         source_label = _safe_relpath(path, PROJECT_ROOT)
         valid_results = [item for item in results if isinstance(item, dict)]
         best = max(valid_results, key=lambda item: _grid_analysis_float(item.get("exact_match_accuracy")), default=None)
@@ -1189,14 +1272,20 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
             "total_time_seconds": payload.get("total_time_seconds"),
             "video_dir": payload.get("video_dir"),
             "best_exact_match_accuracy": best.get("exact_match_accuracy") if best else None,
+            "best_baseline_exact_match_accuracy": best.get("baseline_exact_match_accuracy") if best else None,
+            "best_exact_match_delta": best.get("exact_match_delta") if best else None,
             "best_top_5_accuracy": best.get("top_5_accuracy") if best else None,
             "best_mrr": best.get("mrr") if best else None,
-            "best_config": copy.deepcopy(best.get("config", {})) if best else {},
+            "best_config": _effective_grid_config(best.get("config", {})) if best else {},
+            "best_log_file": best.get("log_file") if best else None,
+            "best_agent_mode": best.get("agent_mode") if best else None,
+            "best_reviewed_segments": best.get("reviewed_segments") if best else None,
+            "best_codex_available": best.get("codex_available") if best else None,
         }
         sources.append(source_info)
 
         for index, item in enumerate(valid_results):
-            config = copy.deepcopy(item.get("config", {})) if isinstance(item.get("config"), dict) else {}
+            config = _effective_grid_config(item.get("config", {})) if isinstance(item.get("config"), dict) else {}
             rows.append({
                 "benchmark": benchmark_id,
                 "retrieval_mode": retrieval_mode,
@@ -1205,6 +1294,8 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
                 "source_index": index,
                 "timestamp": payload.get("timestamp"),
                 "exact_match_accuracy": item.get("exact_match_accuracy"),
+                "baseline_exact_match_accuracy": item.get("baseline_exact_match_accuracy"),
+                "exact_match_delta": item.get("exact_match_delta"),
                 "top_3_accuracy": item.get("top_3_accuracy"),
                 "top_5_accuracy": item.get("top_5_accuracy"),
                 "mrr": item.get("mrr"),
@@ -1212,6 +1303,10 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
                 "indexing_time": item.get("indexing_time"),
                 "matching_time": item.get("matching_time"),
                 "total_time": item.get("total_time"),
+                "reviewed_segments": item.get("reviewed_segments"),
+                "agent_mode": item.get("agent_mode"),
+                "codex_available": item.get("codex_available"),
+                "log_file": item.get("log_file"),
                 "config": config,
                 "config_summary": _grid_analysis_config_summary(config),
             })
@@ -1241,11 +1336,11 @@ def load_grid_search_analysis(output_dir: str, benchmark: Any) -> Dict[str, Any]
 
 
 def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any], retrieval_mode: str) -> Dict[str, Any]:
-    grid_config = copy.deepcopy(best.get("config", {}))
-    mode = best.get("retrieval_mode") or retrieval_mode
+    grid_config = _effective_grid_config(best.get("config", {}))
+    mode = str(best.get("retrieval_mode") or retrieval_mode or "").lower()
 
     if grid_config.get("model_name"):
-        if mode == "videoprism":
+        if mode in {"videoprism", "hybrid_agentic", "agentic_videoprism", "hybrid"}:
             config["videoprism_model"] = grid_config["model_name"]
         else:
             config["openclip_model"] = grid_config["model_name"]
@@ -1272,11 +1367,31 @@ def _apply_best_grid_search_config(config: Dict[str, Any], best: Dict[str, Any],
         ("use_query_cache", "use_query_cache"),
         ("force_refresh_expansions", "force_refresh_expansions"),
         ("disable_llm_expansion", "disable_llm_expansion"),
+        ("agent_enabled", "agent_enabled"),
+        ("agent_decision_mode", "agent_decision_mode"),
+        ("agent_review_scope", "agent_review_scope"),
+        ("agent_shortlist_size", "agent_shortlist_size"),
+        ("agent_ambiguity_margin_threshold", "agent_ambiguity_margin_threshold"),
+        ("agent_max_segments", "agent_max_segments"),
+        ("agent_search_budget_per_segment", "agent_search_budget_per_segment"),
+        ("agent_allow_exclusions", "agent_allow_exclusions"),
+        ("agent_allow_candidate_expansion", "agent_allow_candidate_expansion"),
+        ("agent_advisory_boost", "agent_advisory_boost"),
+        ("agent_verify_assignment_cycles", "agent_verify_assignment_cycles"),
+        ("agent_cycle_critic_min_confidence", "agent_cycle_critic_min_confidence"),
+        ("agent_runtime", "agent_runtime"),
     ]:
         if source_key in grid_config:
             config[target_key] = grid_config[source_key]
 
     config["prompt_mode"] = best.get("prompt_mode", grid_config.get("prompt_mode", "none"))
+    if mode in {"hybrid_agentic", "agentic_videoprism", "hybrid"}:
+        # Results created before the independent critic was introduced did not
+        # record this flag. Preserve those runs exactly instead of silently
+        # enabling a new decision stage when the Editor reapplies them.
+        if "agent_verify_assignment_cycles" not in grid_config:
+            config["agent_verify_assignment_cycles"] = False
+        config["agent_status"] = hybrid_codex_status()
     config["prompt_template"] = best.get("prompt_template")
     config["ensemble_prompts"] = best.get("ensemble_prompts")
     config["exact_matching_mode"] = True
@@ -1469,6 +1584,82 @@ def build_job_command(action: str, payload: Dict[str, Any], settings: Dict[str, 
             command.append("--no-windowing")
         return ("VideoPrism Grid Search", command)
 
+
+    if action in {"hybrid-agentic-benchmark", "hybrid-agentic-grid-search"}:
+        benchmark = str(payload["benchmark"])
+        grid_output_dir = _grid_search_output_dir(output_dir, benchmark, "hybrid_agentic")
+        is_grid = action == "hybrid-agentic-grid-search"
+        command = [
+            sys.executable, "-u", "src/hybrid_agentic.py",
+            "--mode", "grid" if is_grid else "benchmark",
+            "--benchmark", benchmark,
+            "--output", grid_output_dir,
+            "--cache-dir", payload.get("cache_dir") or settings.get("cache_dir", "./cache"),
+            "--device", gpu_device,
+        ]
+
+        def extend_multi(flag: str, key: str) -> None:
+            values = payload.get(key)
+            if values:
+                command.extend([flag] + [str(item) for item in values])
+
+        if is_grid:
+            if payload.get("fast_grid"):
+                command.append("--fast-grid")
+            extend_multi("--models", "models")
+            extend_multi("--frames", "frames")
+            extend_multi("--resolutions", "resolutions")
+            extend_multi("--dual-softmax", "dual_softmax")
+            extend_multi("--prompt-modes", "prompt_modes")
+            extend_multi("--shortlist-sizes", "shortlist_sizes")
+            extend_multi("--ambiguity-margins", "ambiguity_margins")
+            extend_multi("--max-agent-segments-list", "max_agent_segments_list")
+            extend_multi("--agent-search-budgets", "agent_search_budgets")
+            extend_multi("--agent-decision-modes", "agent_decision_modes")
+            extend_multi("--agent-review-scopes", "agent_review_scopes")
+        else:
+            if payload.get("model"):
+                command.extend(["--model", payload["model"]])
+            if payload.get("num_frames"):
+                command.extend(["--num-frames", str(payload["num_frames"])])
+            if payload.get("resolution"):
+                command.extend(["--resolution", str(payload["resolution"])])
+            if payload.get("use_dual_softmax"):
+                command.append("--use-dual-softmax")
+            if payload.get("prompt_mode"):
+                command.extend(["--prompt-mode", payload["prompt_mode"]])
+            if payload.get("shortlist_size"):
+                command.extend(["--shortlist-size", str(payload["shortlist_size"])])
+            if payload.get("ambiguity_margin_threshold") is not None:
+                command.extend(["--ambiguity-margin-threshold", str(payload["ambiguity_margin_threshold"])])
+            if payload.get("max_agent_segments") is not None:
+                command.extend(["--max-agent-segments", str(payload["max_agent_segments"])])
+            if payload.get("agent_search_budget_per_segment") is not None:
+                command.extend(["--agent-search-budget-per-segment", str(payload["agent_search_budget_per_segment"])])
+            if payload.get("agent_decision_mode"):
+                command.extend(["--agent-decision-mode", payload["agent_decision_mode"]])
+            if payload.get("agent_review_scope"):
+                command.extend(["--agent-review-scope", payload["agent_review_scope"]])
+
+        if payload.get("use_codex"):
+            command.extend([
+                "--use-codex",
+                "--codex-model", str(payload.get("codex_model") or DEFAULT_CODEX_MODEL),
+                "--codex-reasoning-effort",
+                str(payload.get("codex_reasoning_effort") or DEFAULT_CODEX_REASONING_EFFORT),
+            ])
+        if payload.get("disable_agent"):
+            command.append("--disable-agent")
+        if payload.get("no_contact_sheets"):
+            command.append("--no-contact-sheets")
+        if payload.get("no_cycle_critic"):
+            command.append("--no-cycle-critic")
+        if payload.get("no_agent_exclusions"):
+            command.append("--no-agent-exclusions")
+        if payload.get("no_agent_candidate_expansion"):
+            command.append("--no-agent-candidate-expansion")
+        return ("Hybrid Agentic VideoPrism " + ("Grid Search" if is_grid else "Benchmark"), command)
+
     if action == "write-a-video-grid-search":
         benchmark = str(payload["benchmark"])
         resolved = resolve_benchmark_paths(benchmark, benchmarks_dir)
@@ -1590,7 +1781,7 @@ class EditorSessionManager:
             "whisper_model": payload.get("whisper_model") or settings.get("whisper_model", "base"),
             "openclip_model": payload.get("openclip_model") or settings.get("openclip_model", "ViT-B-32"),
             "videoprism_model": payload.get("videoprism_model", "videoprism_lvt_public_v1_large"),
-            "exact_matching_mode": bool(payload.get("exact_matching_mode", False)),
+            "exact_matching_mode": retrieval_mode == "hybrid_agentic" or bool(payload.get("exact_matching_mode", False)),
             "windowing": not payload.get("no_windowing", True),
             "window_size": payload.get("window_size", 5.0),
             "window_overlap": payload.get("window_overlap", 0.5),
@@ -1619,6 +1810,23 @@ class EditorSessionManager:
             "disable_llm_expansion": bool(payload.get("disable_llm_expansion", False)),
             "query_generation": {},
             "assignment_diagnostics": {},
+            "agent_enabled": bool(payload.get("agent_enabled", retrieval_mode == "hybrid_agentic")),
+            "agent_decision_mode": payload.get("agent_decision_mode", "advisory"),
+            "agent_review_scope": payload.get("agent_review_scope", "ambiguous"),
+            "agent_shortlist_size": int(payload.get("agent_shortlist_size", 5)),
+            "agent_ambiguity_margin_threshold": float(payload.get("agent_ambiguity_margin_threshold", 0.05)),
+            "agent_max_segments": int(payload.get("agent_max_segments", 5)),
+            "agent_search_budget_per_segment": int(payload.get("agent_search_budget_per_segment", 2)),
+            "agent_allow_contact_sheet": bool(payload.get("agent_allow_contact_sheet", True)),
+            "agent_use_codex": bool(payload.get("use_codex", False)),
+            "agent_codex_model": str(payload.get("codex_model") or DEFAULT_CODEX_MODEL),
+            "agent_codex_reasoning_effort": str(
+                payload.get("codex_reasoning_effort") or DEFAULT_CODEX_REASONING_EFFORT
+            ),
+            "agent_verify_assignment_cycles": bool(payload.get("agent_verify_assignment_cycles", True)),
+            "agent_cycle_critic_min_confidence": float(payload.get("agent_cycle_critic_min_confidence", 0.75)),
+            "agent_runtime": "pending" if retrieval_mode == "hybrid_agentic" else "disabled",
+            "agent_status": hybrid_codex_status() if retrieval_mode == "hybrid_agentic" else {},
         }
         if benchmark and session.config["use_best_grid_search"]:
             best_grid = load_best_grid_search_config(settings.get("output", "./output"), benchmark, retrieval_mode)
@@ -1631,6 +1839,14 @@ class EditorSessionManager:
                     "retrieval_mode": retrieval_mode,
                     "message": "No saved grid-search result was found for this benchmark and retrieval mode.",
                 }
+        if retrieval_mode == "hybrid_agentic":
+            session.config["query_mode"] = "original"
+            session.config["context_window_size"] = 0
+            session.config["disable_llm_expansion"] = True
+            if "agent_verify_assignment_cycles" in payload:
+                session.config["agent_verify_assignment_cycles"] = bool(
+                    payload["agent_verify_assignment_cycles"]
+                )
 
         runtime = EditorRuntime(session=session, session_dir=session_dir)
         try:
@@ -1774,6 +1990,8 @@ class EditorSessionManager:
                 return self._serialize_session(runtime.session)
             runtime.session.segments[segment_id], runtime.session.segments[target] = runtime.session.segments[target], runtime.session.segments[segment_id]
             self._reindex_segments(runtime.session)
+            if runtime.session.config.get("exact_matching_mode", False):
+                self._regenerate_all_candidates(runtime)
             self._touch(runtime.session)
             self._save_runtime(runtime)
         return self._serialize_session(runtime.session)
@@ -1792,7 +2010,10 @@ class EditorSessionManager:
     def regenerate_segment(self, session_id: str, segment_id: int) -> Dict[str, Any]:
         runtime = self._get_runtime(session_id)
         with runtime.lock:
-            self._regenerate_segment_candidates(runtime, segment_id)
+            if runtime.session.config.get("exact_matching_mode", False):
+                self._regenerate_all_candidates(runtime)
+            else:
+                self._regenerate_segment_candidates(runtime, segment_id)
             self._touch(runtime.session)
             self._save_runtime(runtime)
         return self._serialize_session(runtime.session)
@@ -1868,24 +2089,30 @@ class EditorSessionManager:
         window_size = float(session.config.get("window_size", 5.0))
         window_overlap = float(session.config.get("window_overlap", 0.5))
 
-        if mode == "videoprism":
+        if mode in {"videoprism", "hybrid_agentic"}:
             if not VIDEOPRISM_AVAILABLE or VideoIndexer is None:
                 raise RuntimeError("VideoPrism is not available in this environment.")
-            index_dir = cache_dir / "editor_videoprism"
+            model_name = session.config.get("videoprism_model", "videoprism_lvt_public_v1_base")
+            num_frames = int(session.config.get("num_frames", 16))
+            resolution = int(session.config.get("videoprism_resolution", 288))
+            model_token = "large" if "large" in model_name else "base"
+            window_token = f"win_{window_size:g}_{window_overlap:g}" if use_windowing else "nowin"
+            video_token = hashlib.sha1(str(Path(session.video_dir).resolve()).encode("utf-8")).hexdigest()[:10]
+            index_dir = cache_dir / f"editor_{mode}_{video_token}_vp_{model_token}_{num_frames}f_{resolution}p_{window_token}"
             index_dir.mkdir(parents=True, exist_ok=True)
             indexer = VideoIndexer(
-                model_name=session.config.get("videoprism_model", "videoprism_lvt_public_v1_base"),
+                model_name=model_name,
                 index_dir=str(index_dir),
                 device=gpu_device,
-                num_frames=int(session.config.get("num_frames", 16)),
-                resolution=int(session.config.get("videoprism_resolution", 288)),
+                num_frames=num_frames,
+                resolution=resolution,
             )
             if not indexer.load_index():
                 indexer.index_videos(session.video_dir, use_windowing=use_windowing, window_size=window_size, window_overlap=window_overlap)
             runtime.indexer = indexer
             matcher_kwargs = {
                 "video_indexer": indexer,
-                "model_name": session.config.get("videoprism_model", "videoprism_lvt_public_v1_base"),
+                "model_name": model_name,
                 "device": gpu_device,
             }
             if session.config.get("ensemble_prompts"):
@@ -2080,33 +2307,37 @@ class EditorSessionManager:
 
     def _regenerate_exact_matching(self, runtime: EditorRuntime) -> None:
         from matching import create_sequence
-        
+
         script_segments = self._build_query_segments(runtime)
         assignment_method = runtime.session.config.get("assignment_method", "hungarian")
         if runtime.session.retrieval_mode != "videoprism" and assignment_method == "coherence_beam":
             assignment_method = "hungarian"
-        
-        sequence = create_sequence(
-            script_segments=script_segments,
-            video_matcher=runtime.matcher,
-            match_only=True,
-            allow_reuse=False,
-            use_optimal=True,
-            assignment_method=assignment_method,
-            top_k=int(runtime.session.config.get("coherence_top_k", 5)),
-            beam_size=int(runtime.session.config.get("coherence_beam_size", 10)),
-            lambda_coherence=float(runtime.session.config.get("lambda_coherence", 0.1)),
-            normalize_scores=bool(runtime.session.config.get("normalize_coherence_scores", True)),
-            use_dual_softmax=bool(runtime.session.config.get("use_dual_softmax", False)),
-            score_normalization=runtime.session.config.get("score_normalization", "none"),
-            csls_k=int(runtime.session.config.get("csls_k", 5)),
-        )
-        runtime.session.config["assignment_diagnostics"] = getattr(runtime.matcher, "last_assignment_diagnostics", None) or {
-            "assignment_method": assignment_method,
-            "params": {"allow_reuse": False, "match_only": True},
-        }
+
+        if runtime.session.retrieval_mode == "hybrid_agentic":
+            sequence, diagnostics = self._run_hybrid_agentic_editor(runtime, script_segments)
+        else:
+            sequence = create_sequence(
+                script_segments=script_segments,
+                video_matcher=runtime.matcher,
+                match_only=True,
+                allow_reuse=False,
+                use_optimal=True,
+                assignment_method=assignment_method,
+                top_k=int(runtime.session.config.get("coherence_top_k", 5)),
+                beam_size=int(runtime.session.config.get("coherence_beam_size", 10)),
+                lambda_coherence=float(runtime.session.config.get("lambda_coherence", 0.1)),
+                normalize_scores=bool(runtime.session.config.get("normalize_coherence_scores", True)),
+                use_dual_softmax=bool(runtime.session.config.get("use_dual_softmax", False)),
+                score_normalization=runtime.session.config.get("score_normalization", "none"),
+                csls_k=int(runtime.session.config.get("csls_k", 5)),
+            )
+            diagnostics = getattr(runtime.matcher, "last_assignment_diagnostics", None) or {
+                "assignment_method": assignment_method,
+                "params": {"allow_reuse": False, "match_only": True},
+            }
+        runtime.session.config["assignment_diagnostics"] = diagnostics
         runtime.session.config["assignment_diagnostics"]["query_generation"] = runtime.session.config.get("query_generation", {})
-        
+
         for seg, selection in zip(runtime.session.segments, sequence):
             candidate_dict = {
                 "video_id": selection.video_id,
@@ -2193,6 +2424,178 @@ class EditorSessionManager:
             
             seg.candidates = candidate_list
             seg.selected_candidate_id = candidate.candidate_id
+
+    def _run_hybrid_agentic_editor(
+        self,
+        runtime: EditorRuntime,
+        baseline_query_segments: List[Dict[str, Any]],
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        from hybrid_agentic import (
+            HybridAgentConfig,
+            HybridAgentTools,
+            HybridRunConfig,
+            HybridVideoPrismConfig,
+            apply_agent_decisions,
+            assignment_to_log,
+            build_clip_selections,
+            codex_agent_review,
+            codex_cycle_critic,
+            codex_status,
+            dry_run_agent_review,
+            find_ambiguous_segments,
+            gate_full_audit_decisions,
+            solve_assignment,
+            validate_run_config,
+        )
+
+        config = runtime.session.config
+        agent_config = HybridAgentConfig(
+            enabled=bool(config.get("agent_enabled", True)),
+            use_codex=bool(config.get("agent_use_codex", False)),
+            decision_mode=str(config.get("agent_decision_mode", "advisory")),
+            review_scope=str(config.get("agent_review_scope", "ambiguous")),
+            shortlist_size=int(config.get("agent_shortlist_size", 5)),
+            ambiguity_margin_threshold=float(config.get("agent_ambiguity_margin_threshold", 0.05)),
+            max_agent_segments=int(config.get("agent_max_segments", 5)),
+            search_budget_per_segment=int(config.get("agent_search_budget_per_segment", 2)),
+            allow_contact_sheet=bool(config.get("agent_allow_contact_sheet", True)),
+            codex_model=str(config.get("agent_codex_model", DEFAULT_CODEX_MODEL)),
+            codex_reasoning_effort=str(
+                config.get("agent_codex_reasoning_effort", DEFAULT_CODEX_REASONING_EFFORT)
+            ),
+            verify_assignment_cycles=bool(config.get("agent_verify_assignment_cycles", True)),
+            cycle_critic_min_confidence=float(config.get("agent_cycle_critic_min_confidence", 0.75)),
+        )
+        video_config = HybridVideoPrismConfig(
+            model_name=str(config.get("videoprism_model", "videoprism_lvt_public_v1_large")),
+            num_frames=int(config.get("num_frames", 8)),
+            resolution=int(config.get("videoprism_resolution", 288)),
+            use_dual_softmax=bool(config.get("use_dual_softmax", False)),
+            prompt_mode=str(config.get("prompt_mode", "none")),
+            query_mode=str(config.get("query_mode", "original")),
+            score_normalization=str(config.get("score_normalization", "none")),
+            csls_k=int(config.get("csls_k", 5)),
+            no_windowing=not bool(config.get("windowing", False)),
+            window_size=float(config.get("window_size", 5.0)),
+            window_overlap=float(config.get("window_overlap", 0.5)),
+        )
+        validate_run_config(HybridRunConfig(video=video_config, agent=agent_config))
+
+        codex = codex_status()
+        if agent_config.use_codex and not codex.get("ready"):
+            raise RuntimeError("Codex was requested for this editor session, but Codex CLI is not authenticated and ready.")
+
+        original_segments = [
+            {
+                "segment_id": segment.segment_id,
+                "text": segment.text,
+                "duration": max(0.2, segment.duration * segment.duration_multiplier),
+                "start_time": segment.start_time,
+                "end_time": segment.end_time,
+            }
+            for segment in runtime.session.segments
+        ]
+        matrix, metadata = runtime.matcher.compute_similarity_matrix(
+            baseline_query_segments,
+            match_only=True,
+            use_dual_softmax=video_config.use_dual_softmax,
+            score_normalization=video_config.score_normalization,
+            csls_k=video_config.csls_k,
+        )
+        initial_assignment, _ = solve_assignment(matrix, metadata, original_segments)
+        ambiguous = find_ambiguous_segments(
+            matrix,
+            initial_assignment,
+            original_segments,
+            threshold=agent_config.ambiguity_margin_threshold,
+            max_segments=agent_config.max_agent_segments if agent_config.enabled else 0,
+            review_scope=agent_config.review_scope,
+        )
+
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        run_dir = runtime.session_dir / "agent_runs" / f"run_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        decisions: Dict[str, Any] = {
+            "mode": "no_ambiguous_segments" if agent_config.enabled else "disabled",
+            "reviewed_segments": [],
+            "locks": {},
+            "exclusions": {},
+            "advisory_scores": {},
+            "advisory_penalties": {},
+        }
+        tools: Optional[HybridAgentTools] = None
+        if agent_config.enabled and ambiguous:
+            tools = HybridAgentTools(
+                runtime.matcher,
+                runtime.indexer,
+                original_segments,
+                matrix,
+                metadata,
+                initial_assignment,
+                run_dir,
+            )
+            if agent_config.use_codex:
+                decisions = codex_agent_review(tools, ambiguous, agent_config, run_dir, codex)
+            else:
+                decisions = dry_run_agent_review(tools, ambiguous, agent_config)
+        if agent_config.review_scope == "all":
+            if tools is not None and agent_config.use_codex and agent_config.verify_assignment_cycles:
+                decisions = codex_cycle_critic(
+                    tools,
+                    decisions,
+                    initial_assignment,
+                    agent_config,
+                    run_dir,
+                    codex,
+                )
+            else:
+                decisions = gate_full_audit_decisions(decisions, initial_assignment)
+
+        refined_matrix, locks, exclusions = apply_agent_decisions(matrix, decisions, agent_config)
+        final_assignment, rejected = solve_assignment(
+            refined_matrix,
+            metadata,
+            original_segments,
+            locks=locks,
+            exclusions=exclusions,
+        )
+        sequence = build_clip_selections(final_assignment, refined_matrix, metadata, original_segments)
+        if len(sequence) != len(original_segments):
+            raise RuntimeError("Hybrid assignment did not produce one clip for every editor segment.")
+
+        log = {
+            "run_id": run_id,
+            "timestamp": _now_iso(),
+            "pipeline": "hybrid_agentic_editor",
+            "query_contract": {
+                "baseline_prompt_mode": video_config.prompt_mode,
+                "baseline_query_mode": video_config.query_mode,
+                "agent_search_prompt_mode": "none",
+            },
+            "video_config": asdict(video_config),
+            "agent_config": asdict(agent_config),
+            "initial_assignment": assignment_to_log(initial_assignment, matrix, metadata, original_segments),
+            "ambiguous_segments": ambiguous,
+            "agent_decisions": decisions,
+            "final_assignment": assignment_to_log(final_assignment, refined_matrix, metadata, original_segments),
+            "rejected_constraints": rejected,
+        }
+        log_path = run_dir / "hybrid_agentic_editor_log.json"
+        _write_json(log_path, log)
+        config["agent_runtime"] = str(decisions.get("mode", "disabled"))
+        config["agent_log_file"] = str(log_path)
+        return sequence, {
+            "assignment_method": "hungarian",
+            "params": {"allow_reuse": False, "match_only": True},
+            "hybrid_agentic": {
+                "agent_runtime": config["agent_runtime"],
+                "reviewed_segments": len(decisions.get("reviewed_segments", [])),
+                "ambiguous_segments": len(ambiguous),
+                "baseline_prompt_mode": video_config.prompt_mode,
+                "agent_search_prompt_mode": "none",
+                "decision_log": str(log_path),
+            },
+        }
 
     def _regenerate_segment_candidates(self, runtime: EditorRuntime, segment_id: int) -> None:
         segment = runtime.session.segments[segment_id]

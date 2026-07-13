@@ -51,6 +51,7 @@
                   <option value="writeavideo">Write-A-Video</option>
                   <option value="openclip">OpenCLIP</option>
                   <option value="videoprism">VideoPrism</option>
+                  <option value="hybrid_agentic">Hybrid Agentic VideoPrism</option>
                 </select>
               </label>
               <label id="sessionOpenclipModelField">
@@ -128,7 +129,7 @@
                 Normalize Scores
               </label>
               <label id="sessionQueryModeField">
-                Query Generation Mode
+                Baseline VideoPrism Query Mode
                 <select id="sessionQueryMode">
                   <option value="original">Original Segment</option>
                   <option value="context_window">Context Window</option>
@@ -152,6 +153,76 @@
                 <input id="sessionForceRefreshExpansions" type="checkbox" />
                 Force Refresh Expansions
               </label>
+              <label id="sessionAgentDecisionModeField" hidden>
+                Agent Decision Mode
+                <select id="sessionAgentDecisionMode">
+                  <option value="advisory">Advisory: soft boosts and penalties</option>
+                  <option value="hard_lock">Hard constraints for inspected pairs at 90%+ confidence</option>
+                </select>
+              </label>
+              <label id="sessionAgentReviewScopeField" hidden>
+                Agent Review Scope
+                <select id="sessionAgentReviewScope">
+                  <option value="ambiguous">Uncertainty-focused review</option>
+                  <option value="all" selected>Full-sequence visual audit</option>
+                </select>
+              </label>
+              <label id="sessionAgentShortlistField" hidden>
+                Agent Shortlist
+                <select id="sessionAgentShortlist">
+                  <option value="3">3 candidates</option>
+                  <option value="5" selected>5 candidates</option>
+                  <option value="10">10 candidates</option>
+                </select>
+              </label>
+              <label id="sessionAgentMarginField" hidden>
+                Ambiguity Margin
+                <select id="sessionAgentMargin">
+                  <option value="0.02">0.02</option>
+                  <option value="0.05" selected>0.05</option>
+                  <option value="0.10">0.10</option>
+                </select>
+              </label>
+              <label id="sessionAgentMaxSegmentsField" hidden>
+                Max Reviewed Segments
+                <select id="sessionAgentMaxSegments">
+                  <option value="3">3 segments</option>
+                  <option value="5">5 segments</option>
+                  <option value="10" selected>10 segments</option>
+                </select>
+              </label>
+              <label id="sessionAgentSearchBudgetField" hidden>
+                Custom FAISS Searches / Segment
+                <select id="sessionAgentSearchBudget">
+                  <option value="2" selected>2 searches</option>
+                  <option value="4">4 searches</option>
+                </select>
+              </label>
+              <label class="toggle" id="sessionAgentContactSheetsField">
+                <input id="sessionAgentContactSheets" type="checkbox" checked />
+                Enable Visual Contact-Sheet Inspection
+              </label>
+              <label class="toggle" id="sessionAgentUseCodexField" title="Runs the authenticated Codex CLI through the isolated MCP tools. A requested Codex run fails clearly instead of silently switching algorithms.">
+                <input id="sessionAgentUseCodex" type="checkbox" checked />
+                Use Authenticated Codex MCP Agent
+              </label>
+              <label class="toggle" id="sessionAgentCycleCriticField" title="A fresh Codex pass independently verifies each complete no-reuse reassignment component before it can alter the timeline.">
+                <input id="sessionAgentCycleCritic" type="checkbox" checked />
+                Independently Verify Assignment Components
+              </label>
+              <label id="sessionAgentCodexModelField" hidden>
+                Codex Reasoning Model
+                <select id="sessionAgentCodexModel">
+                  <option value="gpt-5.6-sol" selected>GPT-5.6-Sol</option>
+                </select>
+              </label>
+              <label id="sessionAgentCodexReasoningField" hidden>
+                Codex Reasoning Effort
+                <select id="sessionAgentCodexReasoning">
+                  <option value="xhigh" selected>Extra high</option>
+                </select>
+              </label>
+              <div class="panel-note wide" id="sessionAgentContractNote">The best saved hybrid grid settings are applied automatically. The original script segment and saved baseline prompt build the initial VideoPrism matrix; Codex writes complete custom FAISS queries that are embedded without an added template.</div>
             </div>
             <div class="launch-actions">
               <button class="primary" id="createSession">Create Editing Session</button>
@@ -471,6 +542,114 @@
                 </div>
                 <label class="toggle"><input id="videoprismGridNoWindowing" type="checkbox" checked />Disable Windowing</label>
                 <button class="primary" data-job-action="videoprism-grid-search">Run VideoPrism Grid Search</button>
+              </div>
+            </div>
+
+
+
+            <div class="card pipeline-card spotlight-card wide-card">
+              <div class="card-kicker">Agentic VideoPrism + FAISS validation</div>
+              <div class="section-label">Hybrid Agentic VideoPrism</div>
+              <div class="panel-note" id="hybridAgenticStatus">Checking Codex MCP availability. Fast mode uses the best saved VideoPrism backbone and sweeps only agent controls.</div>
+              <div class="stack compact">
+                <label>Benchmark <select id="hybridGridBenchmark"></select></label>
+                <label class="toggle"><input id="hybridGridFastMode" type="checkbox" checked />Fast Agent Sweep Using Best Saved VideoPrism Backbone</label>
+                <div class="pipeline-subgrid">
+                  <label>VideoPrism Model
+                    <select id="hybridGridModels" multiple size="2">
+                      <option value="videoprism_lvt_public_v1_base">VideoPrism Base</option>
+                      <option value="videoprism_lvt_public_v1_large" selected>VideoPrism Large</option>
+                    </select>
+                  </label>
+                  <label>Frames
+                    <select id="hybridGridFrames" multiple size="2">
+                      <option value="8" selected>8</option>
+                      <option value="16" selected>16</option>
+                    </select>
+                  </label>
+                  <label>Resolution
+                    <select id="hybridGridResolutions" multiple size="2">
+                      <option value="288" selected>288p</option>
+                      <option value="396" selected>396p</option>
+                    </select>
+                  </label>
+                  <label>Dual Softmax
+                    <select id="hybridGridDualSM" multiple size="2">
+                      <option value="false" selected>No</option>
+                      <option value="true" selected>Yes</option>
+                    </select>
+                  </label>
+                </div>
+                <label>Baseline Prompt Modes
+                  <select id="hybridGridPrompts" multiple size="4">
+                    <option value="none" selected>None</option>
+                    <option value="template:photo" selected>Template: photo</option>
+                    <option value="template:scene" selected>Template: scene</option>
+                    <option value="template:cooking">Template: cooking</option>
+                  </select>
+                  <span class="panel-note">These templates shape only the initial VideoPrism matrix. They never rewrite Codex custom searches.</span>
+                </label>
+                <div class="pipeline-subgrid">
+                  <label>Review Scope
+                    <select id="hybridGridReviewScopes" multiple size="2">
+                      <option value="ambiguous">Uncertainty-focused review</option>
+                      <option value="all" selected>Full-sequence visual audit</option>
+                    </select>
+                    <span class="panel-note">Full audit reviews every script row; uncertainty mode uses the reviewed-segment cap.</span>
+                  </label>
+                  <label>Decision Mode
+                    <select id="hybridGridDecisionModes" multiple size="2">
+                      <option value="advisory" selected>Advisory: soft adjustments</option>
+                      <option value="hard_lock">Hard constraints for inspected pairs at 90%+ confidence</option>
+                    </select>
+                  </label>
+                  <label>Shortlist Sizes
+                    <select id="hybridGridShortlists" multiple size="3">
+                      <option value="3" selected>3</option>
+                      <option value="5" selected>5</option>
+                      <option value="10">10</option>
+                    </select>
+                  </label>
+                  <label>Ambiguity Margins
+                    <select id="hybridGridMargins" multiple size="3">
+                      <option value="0.02" selected>0.02</option>
+                      <option value="0.05" selected>0.05</option>
+                      <option value="0.10">0.10</option>
+                    </select>
+                  </label>
+                  <label>Reviewed Segments
+                    <select id="hybridGridMaxSegments" multiple size="3">
+                      <option value="3" selected>3</option>
+                      <option value="5" selected>5</option>
+                      <option value="10">10</option>
+                    </select>
+                  </label>
+                  <label>Custom FAISS Searches / Reviewed Segment
+                    <select id="hybridGridSearchBudgets" multiple size="2">
+                      <option value="2" selected>2</option>
+                      <option value="4">4</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="toggle"><input id="hybridGridUseCodex" type="checkbox" />Run Authenticated Codex MCP Agent for Every Configuration</label>
+                <div class="pipeline-subgrid" data-pipeline-show="hybrid-codex">
+                  <label>Codex Reasoning Model
+                    <select id="hybridGridCodexModel">
+                      <option value="gpt-5.6-sol" selected>GPT-5.6-Sol</option>
+                    </select>
+                  </label>
+                  <label>Codex Reasoning Effort
+                    <select id="hybridGridCodexReasoning">
+                      <option value="xhigh" selected>Extra high</option>
+                    </select>
+                  </label>
+                  <div class="panel-note">This execution setting applies to every selected grid configuration and does not multiply the sweep size.</div>
+                </div>
+                <label class="toggle" data-pipeline-show="hybrid-codex"><input id="hybridGridVerifyCycles" type="checkbox" checked />Independently Verify Every Assignment Component</label>
+                <div class="panel-note" data-pipeline-show="hybrid-codex">The critic is a fresh ground-truth-blind Codex pass. It inspects only the anonymous baseline and proposed clips and can reject one component without discarding the others.</div>
+                <label class="toggle"><input id="hybridGridNoContactSheets" type="checkbox" />Disable Visual Contact-Sheet Inspection</label>
+                <div class="panel-note">Hybrid validation always indexes one whole-clip candidate per source so global assignment can guarantee no clip reuse.</div>
+                <button class="primary" data-job-action="hybrid-agentic-grid-search">Run Hybrid Agentic Grid Search</button>
               </div>
             </div>
 
